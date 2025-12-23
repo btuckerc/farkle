@@ -3,25 +3,68 @@ import Foundation
 struct ScoringEngine {
 
     // MARK: - Scoring Configuration
-    struct ScoringRules {
-        var single1Points: Int = 100
-        var single5Points: Int = 50
-        var threePairPoints: Int = 750
-        var straightPoints: Int = 1500 // 1-2-3-4-5-6
-        var twoTripletsPoints: Int = 2500
-        var three1sPoints: Int = 1000
-        var enableTripleFarkleRule: Bool = true
-        var tripleFarklePenalty: Int = 1000
+    struct ScoringRules: Codable, Equatable {
+        var single1Points: Int
+        var single5Points: Int
+        var threePairPoints: Int
+        var straightPoints: Int // 1-2-3-4-5-6
+        var twoTripletsPoints: Int
+        var three1sPoints: Int
+        var enableTripleFarkleRule: Bool
+        var tripleFarklePenalty: Int
 
-        // Three of a kind multipliers
-        var threeOfAKindBase: [Int: Int] = [
-            1: 1000, 2: 200, 3: 300, 4: 400, 5: 500, 6: 600
-        ]
+        // Three of a kind base scores
+        var threeOfAKindBase: [Int: Int]
 
         // Four, five, six of a kind multipliers
-        var fourOfAKindMultiplier: Double = 2.0
-        var fiveOfAKindMultiplier: Double = 3.0
-        var sixOfAKindMultiplier: Double = 4.0
+        var fourOfAKindMultiplier: Double
+        var fiveOfAKindMultiplier: Double
+        var sixOfAKindMultiplier: Double
+        
+        /// Default initializer with official Farkle rules
+        init() {
+            self.single1Points = 100
+            self.single5Points = 50
+            self.threePairPoints = 750
+            self.straightPoints = 1500
+            self.twoTripletsPoints = 2500
+            self.three1sPoints = 1000
+            self.enableTripleFarkleRule = true
+            self.tripleFarklePenalty = 1000
+            self.threeOfAKindBase = [1: 1000, 2: 200, 3: 300, 4: 400, 5: 500, 6: 600]
+            self.fourOfAKindMultiplier = 2.0
+            self.fiveOfAKindMultiplier = 3.0
+            self.sixOfAKindMultiplier = 4.0
+        }
+        
+        /// Full initializer for custom rules
+        init(
+            single1Points: Int,
+            single5Points: Int,
+            threePairPoints: Int,
+            straightPoints: Int,
+            twoTripletsPoints: Int,
+            three1sPoints: Int,
+            enableTripleFarkleRule: Bool,
+            tripleFarklePenalty: Int,
+            threeOfAKindBase: [Int: Int],
+            fourOfAKindMultiplier: Double,
+            fiveOfAKindMultiplier: Double,
+            sixOfAKindMultiplier: Double
+        ) {
+            self.single1Points = single1Points
+            self.single5Points = single5Points
+            self.threePairPoints = threePairPoints
+            self.straightPoints = straightPoints
+            self.twoTripletsPoints = twoTripletsPoints
+            self.three1sPoints = three1sPoints
+            self.enableTripleFarkleRule = enableTripleFarkleRule
+            self.tripleFarklePenalty = tripleFarklePenalty
+            self.threeOfAKindBase = threeOfAKindBase
+            self.fourOfAKindMultiplier = fourOfAKindMultiplier
+            self.fiveOfAKindMultiplier = fiveOfAKindMultiplier
+            self.sixOfAKindMultiplier = sixOfAKindMultiplier
+        }
     }
 
     let rules: ScoringRules
@@ -221,7 +264,12 @@ struct ScoringEngine {
 
     /// Get all possible scoring combinations for given dice
     func getPossibleScorings(for dice: [Int]) -> [ScoringOption] {
-        guard dice.count <= 6 else { return [] }
+        // Safety guards against invalid input
+        guard !dice.isEmpty,
+              dice.count <= 6,
+              dice.allSatisfy({ $0 >= 1 && $0 <= 6 }) else {
+            return []
+        }
 
         var options: Set<ScoringOption> = []
         let diceCount = countDice(dice)
@@ -230,6 +278,9 @@ struct ScoringEngine {
         let validCombinations = generateValidCombinations(dice: dice, diceCount: diceCount)
 
         for combination in validCombinations {
+            // Skip empty combinations
+            guard !combination.isEmpty else { continue }
+            
             let score = calculateScore(for: combination)
             if score > 0 {
                 let option = ScoringOption(
@@ -452,6 +503,11 @@ struct ScoringOption: Identifiable, Hashable, Equatable {
     let selectedDice: [Int]
     let score: Int
     let description: String
+    
+    /// Stable identifier based on content (for SwiftUI ForEach stability)
+    var stableId: String {
+        "\(selectedDice.sorted().map(String.init).joined())-\(score)"
+    }
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(selectedDice.sorted())

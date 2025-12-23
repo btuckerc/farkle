@@ -2,8 +2,16 @@ import SwiftUI
 import AVFoundation
 import AudioToolbox
 
-// Dynamic theme system that adapts to light/dark mode
+// Dynamic theme system that adapts to light/dark mode and user-selected theme
 struct FarkleTheme {
+    // MARK: - Current Theme Helper
+    
+    /// Returns the currently selected theme from UserDefaults
+    private static var currentTheme: AppTheme {
+        let rawValue = UserDefaults.standard.string(forKey: "appTheme") ?? AppTheme.system.rawValue
+        return AppTheme(rawValue: rawValue) ?? .system
+    }
+    
     // MARK: - Semantic Background Colors (adapt to light/dark)
     
     /// Primary background - uses system background
@@ -30,35 +38,35 @@ struct FarkleTheme {
     
     static var shadowColor: Color { Color.black.opacity(0.1) }
     
-    // MARK: - Accent Colors (consistent across modes)
+    // MARK: - Theme-Aware Accent Colors
     
-    /// Primary action color (green for positive actions like banking)
-    static var buttonPrimary: Color { Color(red: 0.2, green: 0.6, blue: 0.2) }
-    static var buttonSecondary: Color { Color(red: 0.2, green: 0.6, blue: 0.2).opacity(0.8) }
+    /// Primary action color (green for positive actions like banking) - theme-aware
+    static var buttonPrimary: Color { currentTheme.buttonPrimary }
+    static var buttonSecondary: Color { currentTheme.buttonSecondary }
     
-    /// Danger/destructive actions
-    static var buttonDanger: Color { Color(red: 0.85, green: 0.25, blue: 0.25) }
-    static var dangerRed: Color { Color(red: 0.85, green: 0.25, blue: 0.25) }
+    /// Danger/destructive actions - theme-aware
+    static var buttonDanger: Color { currentTheme.buttonDanger }
+    static var dangerRed: Color { currentTheme.buttonDanger }
     
     /// Undo/neutral actions
     static var buttonUndo: Color { Color(.systemGray) }
     
-    /// Accent background for highlights
-    static var accentBackground: Color { Color.accentColor.opacity(0.1) }
+    /// Accent background for highlights - theme-aware
+    static var accentBackground: Color { currentTheme.accentColor.opacity(0.1) }
     
-    // MARK: - Dice Colors
+    // MARK: - Theme-Aware Dice Colors
     
     /// Dice dot color - adapts to color scheme
     static var diceDots: Color { .primary }
     
-    /// Selected dice highlight
-    static var diceSelected: Color { Color(red: 0.0, green: 0.5, blue: 0.9) }
+    /// Selected dice highlight - theme-aware
+    static var diceSelected: Color { currentTheme.diceSelected }
     
-    /// Scoring dice highlight (green)
-    static var diceScoring: Color { Color(red: 0.1, green: 0.7, blue: 0.1) }
+    /// Scoring dice highlight - theme-aware
+    static var diceScoring: Color { currentTheme.diceScoring }
     
-    /// Invalid/warning dice highlight (orange)
-    static var diceInvalid: Color { Color(red: 0.9, green: 0.6, blue: 0.1) }
+    /// Invalid/warning dice highlight - theme-aware
+    static var diceInvalid: Color { currentTheme.diceInvalid }
 }
 
 struct ContentView: View {
@@ -84,14 +92,24 @@ struct ContentView: View {
                         ))
 
                 case .playing, .finalRound, .gameOver:
-                    ActiveGameView(gameEngine: gameEngine, multiplayerGameEngine: multiplayerGameEngine)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .trailing),
-                            removal: .move(edge: .leading)
-                        ))
+                    // Route to multiplayer view if in multiplayer mode with simultaneous rounds
+                    if multiplayerGameEngine.isMultiplayerMode {
+                        MultiplayerRoundPlayView(multiplayerEngine: multiplayerGameEngine)
+                            .transition(.asymmetric(
+                                insertion: .move(edge: .trailing),
+                                removal: .move(edge: .leading)
+                            ))
+                    } else {
+                        ActiveGameView(gameEngine: gameEngine, multiplayerGameEngine: multiplayerGameEngine)
+                            .transition(.asymmetric(
+                                insertion: .move(edge: .trailing),
+                                removal: .move(edge: .leading)
+                            ))
+                    }
                 }
             }
             .animation(.easeInOut(duration: 0.5), value: gameEngine.gameState)
+            .animation(.easeInOut(duration: 0.3), value: multiplayerGameEngine.isMultiplayerMode)
         }
         .navigationViewStyle(StackNavigationViewStyle())
     }
@@ -102,124 +120,134 @@ struct ActiveGameView: View {
     @ObservedObject var multiplayerGameEngine: MultiplayerGameEngine
     @State private var showingScoreboard = false
     @State private var showingGameHistory = false
-    @State private var showingRulesEditor = false
     @State private var showingSettings = false
-    @State private var showingThemePicker = false
-
-    @State private var leaderboardExpanded = false
-
-        // Computed property for dynamic bottom offset
-    private var floatingModalBottomOffset: CGFloat {
-        let baseOffset: CGFloat = 35 // Closer to bottom
-
-        // Calculate additional offset based on content
-        var contentHeight: CGFloat = 70 // Base action bar height
-
-        // Add height for round score indicator
-        if let currentPlayer = gameEngine.currentPlayer, currentPlayer.roundScore > 0 {
-            contentHeight += 45 // Round score height + spacing
-        }
-
-        // Adjust for different action bar states
-        if gameEngine.canUndo {
-            contentHeight += 25 // Extra height for undo button
-        }
-
-        return baseOffset + (contentHeight / 2)
-    }
+    @State private var activeConfirmation: ActiveConfirmation? = nil
 
     var body: some View {
-        ZStack {
+        NavigationStack {
             VStack(spacing: 0) {
-                // Top bar with current player
-                TopBarView(gameEngine: gameEngine,
-                          showingScoreboard: $showingScoreboard,
-                          showingGameHistory: $showingGameHistory,
-                          showingRulesEditor: $showingRulesEditor,
-                          showingSettings: $showingSettings,
-                          showingThemePicker: $showingThemePicker,
-                          leaderboardExpanded: $leaderboardExpanded)
+                // Player Strip at top - Flip7-style grid showing all players
+                PlayerStrip(
+                    players: gameEngine.players,
+                    currentPlayerIndex: gameEngine.currentPlayerIndex,
+                    winningScore: gameEngine.winningScore,
+                    require500Opening: gameEngine.require500Opening,
+                    openingScoreThreshold: gameEngine.openingScoreThreshold,
+                    onSelectPlayer: { index in
+                        // Require confirmation for jumping to a different player (referee action)
+                        if index != gameEngine.currentPlayerIndex {
+                            let playerName = gameEngine.players[index].name
+                            activeConfirmation = .jumpToPlayer(playerName: playerName, playerIndex: index)
+                        }
+                    }
+                )
+                .padding(.horizontal)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+                
+                // Compact status bar: mode toggle + game state
+                GameStatusBar(gameEngine: gameEngine)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
 
                 Divider()
 
-                // Top-positioned "need points" banner (moved from bottom)
-                if let currentPlayer = gameEngine.currentPlayer,
-                   gameEngine.require500Opening && currentPlayer.totalScore < gameEngine.openingScoreThreshold {
-                    let pointsNeeded = gameEngine.openingScoreThreshold - currentPlayer.totalScore
-
-                    HStack(spacing: 8) {
-                        Image(systemName: "target")
-                            .foregroundColor(FarkleTheme.buttonPrimary)
-                            .font(.subheadline)
-                        Text("Need \(pointsNeeded) points to get on the board")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                            .foregroundColor(FarkleTheme.textPrimary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(FarkleTheme.accentBackground)
-                    .cornerRadius(12)
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                }
-
-                                // Main game area - reorganized with dice selection at top
+                // Main game area - tight coupling with action bar below
                 ScrollView {
-                    VStack(spacing: 16) {
+                    VStack(spacing: 12) {
                         // Dice selection area at the top (priority content)
                         if gameEngine.isManualMode {
                             ManualScoringView(gameEngine: gameEngine)
                                 .padding()
                                 .background(FarkleTheme.cardBackground)
-                                .cornerRadius(16)
+                                .cornerRadius(20)
                                 .shadow(color: FarkleTheme.shadowColor, radius: 4, x: 0, y: 2)
 
                             // Manual Mode Scoreboard
                             ManualModeScoreboardView(gameEngine: gameEngine)
                                 .padding()
                                 .background(FarkleTheme.cardBackground)
-                                .cornerRadius(16)
+                                .cornerRadius(20)
                                 .shadow(color: FarkleTheme.shadowColor, radius: 4, x: 0, y: 2)
-                        } else if !gameEngine.currentRoll.isEmpty {
+                        } else if !gameEngine.currentRoll.isEmpty || gameEngine.pendingFarkle {
+                            // Dice area - no extra card wrapping for cleaner look
                             DiceSelectionView(gameEngine: gameEngine)
-                                .padding()
-                                .background(FarkleTheme.cardBackground)
-                                .cornerRadius(16)
-                                .shadow(color: FarkleTheme.shadowColor, radius: 4, x: 0, y: 2)
                         }
-
-                        // Streamlined turn info section removed - round score moved to floating element
-
-                        // Bottom padding to account for floating action bar
-                        Spacer().frame(height: 120)
                     }
-                    .padding()
+                    .padding(.horizontal)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8) // Reduced bottom padding - action bar is close
                 }
             }
-
-                        // Removed old leaderboard position - now integrated with player name
-
-                        // Bottom floating elements - dynamically positioned based on content
-            GeometryReader { geometry in
-                VStack(spacing: 8) {
-
-
-
-                    // Floating Action Bar for dice controls - dynamically positioned from bottom
-                    if !gameEngine.isManualMode {
-                        FloatingActionBar(gameEngine: gameEngine)
+            // Anchored action bar at bottom using safeAreaInset (stable, no layout jumps)
+            .safeAreaInset(edge: .bottom) {
+                if !gameEngine.isManualMode {
+                    FloatingActionBar(gameEngine: gameEngine)
+                        .padding(.horizontal)
+                        .padding(.bottom, 6)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                // Leading: Settings gear
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: { showingSettings = true }) {
+                        Image(systemName: "gearshape")
                     }
                 }
-                .frame(maxWidth: .infinity)
-                .position(
-                    x: geometry.size.width / 2,
-                    y: geometry.size.height - floatingModalBottomOffset
-                )
+                
+                // Trailing: History, Scoreboard, Actions menu
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    Button(action: { showingGameHistory = true }) {
+                        Image(systemName: "clock.arrow.circlepath")
+                    }
+                    
+                    Button(action: { showingScoreboard = true }) {
+                        Image(systemName: "list.number")
+                    }
+                    
+                    Menu {
+                        // Referee tools - only show for host in multiplayer or always in single player
+                        if !multiplayerGameEngine.isMultiplayerMode || multiplayerGameEngine.isNetworkHost {
+                            Section("Referee Tools") {
+                                Button {
+                                    activeConfirmation = .skipTurn
+                                } label: {
+                                    Label("Skip Turn", systemImage: "forward.fill")
+                                }
+                                
+                                Button {
+                                    activeConfirmation = .previousPlayer
+                                } label: {
+                                    Label("Previous Player", systemImage: "backward.fill")
+                                }
+                            }
+                            
+                            Divider()
                         }
-
-
+                        
+                        // End game - always show but with different text
+                        Button(role: .destructive) {
+                            if multiplayerGameEngine.isMultiplayerMode && !multiplayerGameEngine.isNetworkHost {
+                                // Clients leave the game
+                                multiplayerGameEngine.leaveMultiplayerGame()
+                                gameEngine.resetGame()
+                            } else {
+                                activeConfirmation = .endGame
+                            }
+                        } label: {
+                            Label(
+                                multiplayerGameEngine.isMultiplayerMode && !multiplayerGameEngine.isNetworkHost 
+                                    ? "Leave Game" 
+                                    : "End Game",
+                                systemImage: "xmark.circle"
+                            )
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                }
+            }
         }
         .sheet(isPresented: $showingScoreboard) {
             ScoreboardView(gameEngine: gameEngine)
@@ -227,99 +255,152 @@ struct ActiveGameView: View {
         .sheet(isPresented: $showingGameHistory) {
             GameHistoryView(gameEngine: gameEngine)
         }
-        .sheet(isPresented: $showingRulesEditor) {
-            GameRulesEditorView(gameEngine: gameEngine)
-        }
         .sheet(isPresented: $showingSettings) {
-            GameSettingsView(gameEngine: gameEngine)
+            SettingsView(gameEngine: gameEngine)
         }
-        .sheet(isPresented: $showingThemePicker) {
-            ThemePickerView()
+        // Confirmation overlay for admin/destructive actions
+        .fullScreenCover(item: $activeConfirmation) { confirmation in
+            ConfirmationOverlay(
+                title: confirmation.title,
+                message: confirmation.message,
+                primaryActionTitle: confirmation.primaryActionTitle,
+                primaryActionRole: confirmation.isDestructive ? .destructive : nil,
+                onPrimary: {
+                    performConfirmation(confirmation)
+                },
+                onDismiss: {
+                    activeConfirmation = nil
+                }
+            )
+            .background(ClearBackgroundView())
         }
-
-        .alert("Game Over!", isPresented: .constant(gameEngine.gameState == .gameOver)) {
-            Button("New Game") {
-                gameEngine.resetGame()
-            }
-            Button("View Scores") {
-                showingScoreboard = true
-            }
-        } message: {
-            if let winner = gameEngine.getPlayerRanking().first {
-                Text("\(winner.name) wins with \(winner.totalScore) points!")
-            }
+        // Custom blocking game over overlay (replaces system alert)
+        .fullScreenCover(isPresented: .constant(gameEngine.gameState == .gameOver && activeConfirmation == nil)) {
+            GameOverOverlay(gameEngine: gameEngine)
+                .background(ClearBackgroundView())
+        }
+    }
+    
+    private func performConfirmation(_ confirmation: ActiveConfirmation) {
+        switch confirmation {
+        case .skipTurn:
+            gameEngine.skipTurn()
+        case .bankScore:
+            gameEngine.bankScore()
+        case .endGame:
+            gameEngine.resetGame()
+        case .newGame:
+            gameEngine.resetGame()
+        case .playAgain:
+            gameEngine.restartGame()
+        case .previousPlayer:
+            gameEngine.goToPreviousPlayer()
+        case .jumpToPlayer(_, let index):
+            gameEngine.jumpToPlayer(at: index)
+        case .farkleManual:
+            gameEngine.farkleManualTurn()
+        case .switchMode:
+            // Mode switching is handled directly in GameStatusBar/GameHeaderView
+            gameEngine.toggleManualMode()
         }
     }
 }
 
-struct TopBarView: View {
+// Compact status bar with mode toggle and game state (replaces old GameHeaderView)
+struct GameStatusBar: View {
     @ObservedObject var gameEngine: GameEngine
-    @Binding var showingScoreboard: Bool
-    @Binding var showingGameHistory: Bool
-    @Binding var showingRulesEditor: Bool
-    @Binding var showingSettings: Bool
-    @Binding var showingThemePicker: Bool
+    @State private var modeSwitchConfirmation: ActiveConfirmation? = nil
+    
+    var body: some View {
+        HStack {
+            // Game state indicator
+            GameStateIndicator(gameState: gameEngine.gameState)
+            
+            Spacer()
+            
+            // "Need points" indicator (compact)
+            if let currentPlayer = gameEngine.currentPlayer,
+               gameEngine.require500Opening && !currentPlayer.isOnBoard {
+                let pointsNeeded = gameEngine.openingScoreThreshold - currentPlayer.roundScore
+                HStack(spacing: 4) {
+                    Image(systemName: "target")
+                        .font(.system(size: 11))
+                    Text("Need \(pointsNeeded) pts")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                }
+                .foregroundColor(FarkleTheme.buttonPrimary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(FarkleTheme.accentBackground)
+                .cornerRadius(8)
+            }
+            
+            Spacer()
+            
+            // Mode toggle (Digital/Calculator)
+            if gameEngine.gameState == .playing || gameEngine.gameState == .finalRound {
+                Button(action: {
+                    handleModeToggle()
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: gameEngine.isManualMode ? "gamecontroller.fill" : "die.face.6.fill")
+                            .font(.system(size: 12))
+                        Text(gameEngine.isManualMode ? "Digital" : "Calculator")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundColor(FarkleTheme.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(FarkleTheme.accentBackground)
+                    .cornerRadius(8)
+                }
+            }
+        }
+        // Mode switch confirmation overlay
+        .fullScreenCover(item: $modeSwitchConfirmation) { confirmation in
+            ConfirmationOverlay(
+                title: confirmation.title,
+                message: confirmation.message,
+                primaryActionTitle: confirmation.primaryActionTitle,
+                primaryActionRole: confirmation.isDestructive ? .destructive : nil,
+                onPrimary: {
+                    gameEngine.toggleManualMode()
+                },
+                onDismiss: {
+                    modeSwitchConfirmation = nil
+                }
+            )
+            .background(ClearBackgroundView())
+        }
+    }
+    
+    /// Handle mode toggle with confirmation when there's in-progress state
+    private func handleModeToggle() {
+        // Check if there's in-progress state in the current mode
+        if gameEngine.switchingModeWouldAffectProgress {
+            // Show confirmation - toManual is the DESTINATION mode (opposite of current)
+            modeSwitchConfirmation = .switchMode(toManual: !gameEngine.isManualMode)
+        } else {
+            // No in-progress state, switch immediately
+            gameEngine.toggleManualMode()
+        }
+    }
+}
 
+// Legacy GameHeaderView (kept for compatibility, but no longer used in main loop)
+struct GameHeaderView: View {
+    @ObservedObject var gameEngine: GameEngine
     @Binding var leaderboardExpanded: Bool
+    @State private var modeSwitchConfirmation: ActiveConfirmation? = nil
 
     var body: some View {
         VStack(spacing: 8) {
-            // Line 1: Farkle + History, Custom Scoring, Scoreboard, Ellipses
-            HStack {
-                Text("Farkle")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .foregroundColor(FarkleTheme.textPrimary)
-
-                Spacer()
-
-                HStack(spacing: 15) {
-                    Button(action: { showingGameHistory = true }) {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.title2)
-                            .foregroundColor(FarkleTheme.textSecondary)
-                    }
-
-                    Button(action: { showingScoreboard = true }) {
-                        Image(systemName: "list.number")
-                            .font(.title2)
-                            .foregroundColor(FarkleTheme.textSecondary)
-                    }
-
-                    Menu {
-                        Button("Edit Rules") {
-                            showingRulesEditor = true
-                        }
-                        Button("Game Settings") {
-                            showingSettings = true
-                        }
-                        Button("Appearance") {
-                            showingThemePicker = true
-                        }
-                        Divider()
-                        Button("Skip Turn") {
-                            gameEngine.skipPlayer()
-                        }
-                        Button("Previous Player") {
-                            gameEngine.goToPreviousPlayer()
-                        }
-                        Button(gameEngine.gameState == .setup ? "New Game" : "End Game", role: gameEngine.gameState == .setup ? nil : .destructive) {
-                            gameEngine.resetGame()
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle.fill")
-                            .font(.title2)
-                            .foregroundColor(FarkleTheme.textSecondary)
-                    }
-                }
-            }
-
-            // Line 2: Player's Turn + Playing Status
+            // Line 1: Player's Turn + Playing Status
             HStack {
                 if let currentPlayer = gameEngine.currentPlayer {
                     Text("\(currentPlayer.name)'s Turn")
-                        .font(.title)
-                        .fontWeight(.semibold)
+                        .font(.title2)
+                        .fontWeight(.bold)
                         .foregroundColor(FarkleTheme.buttonPrimary)
                 } else {
                     Text("Game Setup")
@@ -332,7 +413,7 @@ struct TopBarView: View {
                 GameStateIndicator(gameState: gameEngine.gameState)
             }
 
-            // Line 3: Leaderboard + Manual/Digital Toggle
+            // Line 2: Leaderboard + Manual/Digital Toggle
             HStack {
                 if gameEngine.gameState == .playing || gameEngine.gameState == .finalRound {
                     TopRightLeaderboardView(gameEngine: gameEngine, isExpanded: $leaderboardExpanded)
@@ -344,7 +425,7 @@ struct TopBarView: View {
 
                 if gameEngine.gameState == .playing || gameEngine.gameState == .finalRound {
                     Button(action: {
-                        gameEngine.toggleManualMode()
+                        handleModeToggle()
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: gameEngine.isManualMode ? "gamecontroller.fill" : "die.face.6.fill")
@@ -363,6 +444,30 @@ struct TopBarView: View {
             }
         }
         .padding()
+        // Mode switch confirmation overlay
+        .fullScreenCover(item: $modeSwitchConfirmation) { confirmation in
+            ConfirmationOverlay(
+                title: confirmation.title,
+                message: confirmation.message,
+                primaryActionTitle: confirmation.primaryActionTitle,
+                primaryActionRole: confirmation.isDestructive ? .destructive : nil,
+                onPrimary: {
+                    gameEngine.toggleManualMode()
+                },
+                onDismiss: {
+                    modeSwitchConfirmation = nil
+                }
+            )
+            .background(ClearBackgroundView())
+        }
+    }
+    
+    private func handleModeToggle() {
+        if gameEngine.switchingModeWouldAffectProgress {
+            modeSwitchConfirmation = .switchMode(toManual: !gameEngine.isManualMode)
+        } else {
+            gameEngine.toggleManualMode()
+        }
     }
 }
 
@@ -440,126 +545,233 @@ struct FloatingScoreboardView: View {
 // Floating action bar for dice controls
 struct FloatingActionBar: View {
     @ObservedObject var gameEngine: GameEngine
-    @State private var showingSkipConfirmation = false
+    @State private var activeConfirmation: ActiveConfirmation? = nil
+    @AppStorage("requireHoldToConfirm") private var requireHoldToConfirm: Bool = true
 
     var body: some View {
-        VStack(spacing: 8) {
-            // Undo button (appears above main actions when available)
-            if gameEngine.canUndo {
-                Button(action: { gameEngine.undoLastSelection() }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.caption)
-                        Text("Undo Last Selection")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                    }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(FarkleTheme.buttonUndo)
-                    .cornerRadius(20)
-                }
-                .transition(.scale.combined(with: .opacity))
-            }
-
-            // Main action section
-            if gameEngine.currentRoll.isEmpty {
-                // Roll dice button
-                Button(action: { rollDice() }) {
-                    HStack(spacing: 8) {
-                        HStack(spacing: 4) {
-                            Text("\(gameEngine.remainingDice)×")
-                                .font(.title3)
-                                .fontWeight(.bold)
-                            Image(systemName: "die.face.6")
+        ZStack {
+            VStack(spacing: 12) {
+                // Main action section
+                if gameEngine.pendingFarkle {
+                    // Farkle state: show only "Next Player" button
+                    Button(action: {
+                        HapticFeedback.medium()
+                        // Announce farkle before acknowledging
+                        let nextPlayerIndex = (gameEngine.currentPlayerIndex + 1) % gameEngine.players.count
+                        let nextPlayerName = gameEngine.players.indices.contains(nextPlayerIndex) ? gameEngine.players[nextPlayerIndex].name : nil
+                        AccessibilityAnnouncer.announceFarkle(
+                            playerName: gameEngine.farklePlayerName,
+                            diceValues: gameEngine.farkleDice,
+                            nextPlayerName: nextPlayerName
+                        )
+                        gameEngine.acknowledgeFarkle()
+                    }) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "arrow.right.circle.fill")
                                 .font(.title2)
-                        }
-                        Text("Roll Dice")
-                            .font(.title3)
-                            .fontWeight(.semibold)
-                    }
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 16)
-                                            .background(canRoll ? FarkleTheme.buttonSecondary : FarkleTheme.textSecondary.opacity(0.3))
-                    .cornerRadius(25)
-                }
-                .disabled(!canRoll)
-                .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
-            } else {
-                // Dice selection actions
-                VStack(spacing: 16) { // Increased spacing between button rows
-                    // Top row: Skip Turn and Bank Score
-                    HStack(spacing: 12) {
-                        Button("Skip Turn") {
-                            showingSkipConfirmation = true
-                        }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background(FarkleTheme.dangerRed)
-                        .cornerRadius(20)
-
-                        Button("Bank Score") {
-                            gameEngine.bankScore()
-                        }
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 12)
-                        .background(canBankScore ? FarkleTheme.diceSelected : FarkleTheme.textSecondary.opacity(0.3))
-                        .cornerRadius(20)
-                        .disabled(!canBankScore)
-                    }
-
-                    // Bottom row: Keep Rolling (main action) with re-roll icon
-                    Button(action: { gameEngine.continueRolling() }) {
-                        HStack(spacing: 8) {
-                            if gameEngine.remainingDice > 0 {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .font(.title3)
-                                    .fontWeight(.semibold)
-                            }
-                            Text("Keep Rolling")
+                            Text("Next Player")
                                 .font(.title3)
                                 .fontWeight(.semibold)
                         }
                         .foregroundColor(.white)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 16)
-                        .background(canContinueRolling ? FarkleTheme.buttonSecondary : FarkleTheme.textSecondary.opacity(0.3))
-                        .cornerRadius(25)
-                        .overlay(
-                            // Subtle glow when all dice will be selected (hot dice situation)
-                            RoundedRectangle(cornerRadius: 25)
-                                .stroke(Color.orange, lineWidth: shouldGlowKeepRolling ? 2 : 0)
-                                .shadow(color: .orange, radius: shouldGlowKeepRolling ? 8 : 0)
-                                .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: shouldGlowKeepRolling)
-                        )
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 18)
+                        .background(FarkleTheme.diceSelected)
+                        .cornerRadius(16)
                     }
-                    .disabled(!canContinueRolling)
+                    .shadow(color: .black.opacity(0.15), radius: 4, x: 0, y: 2)
+                    .transition(.scale.combined(with: .opacity))
+                } else if gameEngine.currentRoll.isEmpty {
+                    // Pre-roll state: show Undo (if available) and Roll button
+                    HStack(spacing: 12) {
+                        // Prominent Undo button (Flip7 style)
+                        if gameEngine.canUndo {
+                            Button(action: {
+                                HapticFeedback.light()
+                                gameEngine.undoLastSelection()
+                            }) {
+                                Image(systemName: "arrow.uturn.backward.circle.fill")
+                                    .font(.system(size: 32))
+                                    .foregroundColor(.blue)
+                            }
+                            .transition(.scale.combined(with: .opacity))
+                        }
+                        
+                        // Roll dice button
+                        Button(action: { rollDice() }) {
+                            HStack(spacing: 8) {
+                                HStack(spacing: 4) {
+                                    Text("\(gameEngine.remainingDice)×")
+                                        .font(.title3)
+                                        .fontWeight(.bold)
+                                        .monospacedDigit()
+                                    Image(systemName: "die.face.6")
+                                        .font(.title2)
+                                }
+                                Text("Roll Dice")
+                                    .font(.title3)
+                                    .fontWeight(.semibold)
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 16)
+                            .background(canRoll ? FarkleTheme.buttonSecondary : FarkleTheme.textSecondary.opacity(0.3))
+                            .cornerRadius(25)
+                        }
+                        .disabled(!canRoll)
+                    }
+                    .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+                } else {
+                    // Dice selection actions - reorganized with hold-to-confirm
+                    VStack(spacing: 12) {
+                        // Selection summary strip
+                        SelectionSummaryStrip(gameEngine: gameEngine)
+                        
+                        // Top row: Undo (prominent) + Keep Rolling (main action)
+                        HStack(spacing: 12) {
+                            // Prominent Undo button (always visible in thumb zone)
+                            Button(action: {
+                                HapticFeedback.light()
+                                gameEngine.undoLastSelection()
+                            }) {
+                                Image(systemName: "arrow.uturn.backward.circle.fill")
+                                    .font(.system(size: 32))
+                                    .foregroundColor(gameEngine.canUndo ? .blue : .gray.opacity(0.4))
+                            }
+                            .disabled(!gameEngine.canUndo)
+                            
+                            // Keep Rolling (main action, tap OK)
+                            Button(action: {
+                                HapticFeedback.medium()
+                                gameEngine.continueRolling()
+                            }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                        .font(.title3)
+                                        .fontWeight(.semibold)
+                                    Text("Keep Rolling")
+                                        .font(.title3)
+                                        .fontWeight(.semibold)
+                                }
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                                .background(canContinueRolling ? FarkleTheme.buttonSecondary : FarkleTheme.textSecondary.opacity(0.3))
+                                .cornerRadius(14)
+                                .overlay(
+                                    // Subtle glow when hot dice (all dice selected)
+                                    RoundedRectangle(cornerRadius: 14)
+                                        .stroke(Color.orange, lineWidth: shouldGlowKeepRolling ? 2 : 0)
+                                        .shadow(color: .orange, radius: shouldGlowKeepRolling ? 8 : 0)
+                                )
+                            }
+                            .disabled(!canContinueRolling)
+                        }
+
+                        // Bottom row: Skip Turn + Bank Score (hold or tap based on setting)
+                        HStack(spacing: 12) {
+                            if requireHoldToConfirm {
+                                // Hold-to-confirm mode (default)
+                                CompactHoldButton(
+                                    title: "Skip",
+                                    icon: "forward.fill",
+                                    holdDuration: 0.5,
+                                    backgroundColor: FarkleTheme.dangerRed,
+                                    action: {
+                                        announceAndSkip()
+                                    }
+                                )
+                                
+                                HoldToConfirmButton(
+                                    holdDuration: 0.6,
+                                    backgroundColor: canBankScore ? FarkleTheme.diceSelected : FarkleTheme.textSecondary.opacity(0.3),
+                                    isEnabled: canBankScore,
+                                    action: {
+                                        announceAndBank()
+                                    }
+                                ) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 16, weight: .semibold))
+                                        VStack(spacing: 1) {
+                                            Text("Bank Score")
+                                                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                            if canBankScore {
+                                                Text("Hold to confirm")
+                                                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                                                    .opacity(0.7)
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Tap-to-confirm mode (accessibility friendly)
+                                Button(action: {
+                                    HapticFeedback.light()
+                                    activeConfirmation = .skipTurn
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "forward.fill")
+                                            .font(.system(size: 14, weight: .semibold))
+                                        Text("Skip")
+                                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    }
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 10)
+                                    .background(FarkleTheme.dangerRed)
+                                    .cornerRadius(10)
+                                }
+                                
+                                Button(action: {
+                                    HapticFeedback.light()
+                                    activeConfirmation = .bankScore
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .font(.system(size: 16, weight: .semibold))
+                                        Text("Bank Score")
+                                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                    }
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(canBankScore ? FarkleTheme.diceSelected : FarkleTheme.textSecondary.opacity(0.3))
+                                    .cornerRadius(12)
+                                }
+                                .disabled(!canBankScore)
+                            }
+                        }
+                    }
+                    .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
                 }
-                .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
             }
+            .padding(16)
+            .background(FarkleTheme.cardBackground)
+            .cornerRadius(20)
+            .shadow(color: FarkleTheme.shadowColor, radius: 8, x: 0, y: -2)
+            .animation(.easeInOut(duration: 0.2), value: gameEngine.canUndo)
+            .animation(.easeInOut(duration: 0.3), value: gameEngine.pendingFarkle)
         }
-        .padding(16)
-        .background(FarkleTheme.cardBackground) // Fully opaque background
-        .cornerRadius(20)
-        .shadow(color: FarkleTheme.shadowColor, radius: 8, x: 0, y: -2)
-        .alert("Skip Turn?", isPresented: $showingSkipConfirmation) {
-            Button("Cancel", role: .cancel) { }
-            Button("Skip Turn", role: .destructive) {
-                gameEngine.skipTurn()
-                // Haptic feedback
-                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-                impactFeedback.impactOccurred()
-            }
-        } message: {
-            Text("This will end your turn without banking any points. Are you sure?")
+        // Confirmation overlay (in-app, not system alert)
+        .fullScreenCover(item: $activeConfirmation) { confirmation in
+            ConfirmationOverlay(
+                title: confirmation.title,
+                message: confirmation.message,
+                primaryActionTitle: confirmation.primaryActionTitle,
+                primaryActionRole: confirmation.isDestructive ? .destructive : nil,
+                onPrimary: {
+                    performConfirmation(confirmation)
+                },
+                onDismiss: {
+                    activeConfirmation = nil
+                }
+            )
+            .background(ClearBackgroundView())
         }
     }
 
-        private var canRoll: Bool {
+    private var canRoll: Bool {
         gameEngine.currentRoll.isEmpty && (gameEngine.gameState == .playing || gameEngine.gameState == .finalRound)
     }
 
@@ -572,24 +784,209 @@ struct FloatingActionBar: View {
     }
 
     private var shouldGlowKeepRolling: Bool {
-        // Glow when all current dice will be selected (next roll will be 6 dice)
         let selectedCount = gameEngine.selectedDice.count
         let currentRollCount = gameEngine.currentRoll.count
         return selectedCount == currentRollCount && selectedCount > 0
     }
 
-        private func rollDice() {
-        // Play dice rolling sound effect
+    private func rollDice() {
         SoundManager.shared.playDiceRoll()
-
-        let _ = withAnimation(.easeInOut(duration: 0.3)) {
+        HapticFeedback.medium()
+        let diceCount = gameEngine.remainingDice
+        let result = withAnimation(.easeInOut(duration: 0.3)) {
             gameEngine.rollDice()
         }
-
-        // Add haptic feedback (SoundManager already includes this, but keeping for redundancy)
-        let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-        impactFeedback.impactOccurred()
+        // Announce the roll for VoiceOver users
+        AccessibilityAnnouncer.announceRoll(diceCount: diceCount, values: result)
     }
+    
+    private func performConfirmation(_ confirmation: ActiveConfirmation) {
+        switch confirmation {
+        case .skipTurn:
+            announceAndSkip()
+        case .bankScore:
+            announceAndBank()
+        case .endGame, .newGame:
+            gameEngine.resetGame()
+        case .playAgain:
+            gameEngine.restartGame()
+        case .previousPlayer:
+            gameEngine.goToPreviousPlayer()
+        case .jumpToPlayer(_, let index):
+            gameEngine.jumpToPlayer(at: index)
+        case .farkleManual:
+            gameEngine.farkleManualTurn()
+        case .switchMode:
+            // Mode switching is handled directly in GameStatusBar/GameHeaderView
+            gameEngine.toggleManualMode()
+        }
+    }
+    
+    private func announceAndBank() {
+        guard let player = gameEngine.currentPlayer else {
+            gameEngine.bankScore()
+            return
+        }
+        
+        let playerName = player.name
+        let pointsBanking = gameEngine.turnScore
+        let projectedTotal = player.totalScore + player.roundScore + gameEngine.turnScore
+        
+        // Calculate next player
+        let nextPlayerIndex = (gameEngine.currentPlayerIndex + 1) % gameEngine.players.count
+        let nextPlayerName = gameEngine.players.indices.contains(nextPlayerIndex) ? gameEngine.players[nextPlayerIndex].name : nil
+        
+        gameEngine.bankScore()
+        
+        // Announce after banking
+        AccessibilityAnnouncer.announceBank(
+            playerName: playerName,
+            pointsBanked: pointsBanking,
+            newTotal: projectedTotal,
+            nextPlayerName: nextPlayerName
+        )
+    }
+    
+    private func announceAndSkip() {
+        guard let player = gameEngine.currentPlayer else {
+            gameEngine.skipTurn()
+            return
+        }
+        
+        let playerName = player.name
+        let nextPlayerIndex = (gameEngine.currentPlayerIndex + 1) % gameEngine.players.count
+        let nextPlayerName = gameEngine.players.indices.contains(nextPlayerIndex) ? gameEngine.players[nextPlayerIndex].name : nil
+        
+        gameEngine.skipTurn()
+        
+        AccessibilityAnnouncer.announceSkip(playerName: playerName, nextPlayerName: nextPlayerName)
+    }
+}
+
+// Compact selection summary strip for the action bar
+struct SelectionSummaryStrip: View {
+    @ObservedObject var gameEngine: GameEngine
+    
+    private var hasSelection: Bool {
+        !gameEngine.selectedDice.isEmpty
+    }
+    
+    private var projectedRoundTotal: Int {
+        (gameEngine.currentPlayer?.roundScore ?? 0) + gameEngine.turnScore
+    }
+    
+    /// Sort dice by scoring value descending: sets of 3+ by value, then 1s, then 5s
+    private var sortedSelectedDice: [Int] {
+        let dice = gameEngine.selectedDice
+        var counts: [Int: Int] = [:]
+        for die in dice {
+            counts[die, default: 0] += 1
+        }
+        
+        // Build sorted array: groups of 3+ first (by count desc, then value desc), then 1s, then 5s, then others
+        var result: [Int] = []
+        
+        // First: triplets+ sorted by count desc, then by value desc (higher sets = higher score)
+        let tripletsOrMore = counts.filter { $0.value >= 3 }.sorted { 
+            if $0.value != $1.value { return $0.value > $1.value }
+            // For same count, 1s score highest (1000 for 3), then 6s (600), etc.
+            if $0.key == 1 { return true }
+            if $1.key == 1 { return false }
+            return $0.key > $1.key
+        }
+        for (value, count) in tripletsOrMore {
+            result.append(contentsOf: Array(repeating: value, count: count))
+            counts[value] = 0
+        }
+        
+        // Then: remaining 1s (100 each)
+        if let onesCount = counts[1], onesCount > 0 {
+            result.append(contentsOf: Array(repeating: 1, count: onesCount))
+            counts[1] = 0
+        }
+        
+        // Then: remaining 5s (50 each)
+        if let fivesCount = counts[5], fivesCount > 0 {
+            result.append(contentsOf: Array(repeating: 5, count: fivesCount))
+            counts[5] = 0
+        }
+        
+        // Any remaining dice (shouldn't score but include for completeness)
+        for (value, count) in counts.sorted(by: { $0.key > $1.key }) where count > 0 {
+            result.append(contentsOf: Array(repeating: value, count: count))
+        }
+        
+        return result
+    }
+    
+    var body: some View {
+        HStack(spacing: 12) {
+            if hasSelection {
+                // Selected dice chips - sorted by scoring value
+                HStack(spacing: 4) {
+                    ForEach(Array(sortedSelectedDice.enumerated()), id: \.offset) { _, die in
+                        Text("\(die)")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                            .frame(width: 22, height: 22)
+                            .background(FarkleTheme.diceSelected)
+                            .cornerRadius(4)
+                    }
+                }
+                
+                Spacer()
+                
+                // Points summary
+                VStack(alignment: .trailing, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text("\(gameEngine.turnScore)")
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundColor(FarkleTheme.diceSelected)
+                        Text("pts")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(FarkleTheme.textSecondary)
+                    }
+                    
+                    Text("Round: \(projectedRoundTotal)")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(FarkleTheme.buttonSecondary)
+                }
+            } else {
+                // Hint when nothing selected
+                HStack(spacing: 6) {
+                    Image(systemName: "hand.tap")
+                        .font(.system(size: 14))
+                        .foregroundColor(FarkleTheme.textSecondary)
+                    Text("Select scoring dice to continue")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(FarkleTheme.textSecondary)
+                }
+                
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(FarkleTheme.tertiaryBackground)
+        .cornerRadius(10)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(hasSelection ? "Selected \(gameEngine.selectedDice.count) dice for \(gameEngine.turnScore) points. Round total will be \(projectedRoundTotal)." : "Select scoring dice to continue")
+    }
+}
+
+// Helper view for transparent fullScreenCover background
+struct ClearBackgroundView: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        DispatchQueue.main.async {
+            view.superview?.superview?.backgroundColor = .clear
+        }
+        return view
+    }
+    
+    func updateUIView(_ uiView: UIView, context: Context) {}
 }
 
 struct CollapsedScoreboardContent: View {
@@ -957,18 +1354,38 @@ struct StatView: View {
 struct GameRulesEditorView: View {
     @ObservedObject var gameEngine: GameEngine
     @Environment(\.dismiss) private var dismiss
+    
+    // Track if opening score was just toggled off (to set players on board)
+    @State private var previousOpeningRequirement: Bool = true
 
-    // Computed property to determine if winning score can be changed
-    private var canChangeWinningScore: Bool {
-        let maxPlayerScore = gameEngine.players.map { $0.totalScore }.max() ?? 0
-        return gameEngine.winningScore > maxPlayerScore
+    // Computed properties for winning score constraints
+    private var maxPlayerScore: Int {
+        gameEngine.players.map { $0.totalScore }.max() ?? 0
     }
-
-    // Available winning score options that are higher than the max player score
-    private var availableWinningScores: [Int] {
-        let maxPlayerScore = gameEngine.players.map { $0.totalScore }.max() ?? 0
-        let allOptions = [5000, 10000, 15000, 20000]
-        return allOptions.filter { $0 > maxPlayerScore }
+    
+    private var winningScoreRange: ClosedRange<Int> {
+        let minScore = max(1000, maxPlayerScore + 1)
+        return minScore...100000
+    }
+    
+    private var canEditWinningScore: Bool {
+        // Must be host (in multiplayer) and not in final round
+        guard gameEngine.canEditRules else { return false }
+        return gameEngine.gameState != .finalRound
+    }
+    
+    private var winningScoreDisabledReason: String? {
+        if !gameEngine.canEditRules {
+            return gameEngine.editingDisabledReason
+        }
+        if gameEngine.gameState == .finalRound {
+            return "Cannot change during final round"
+        }
+        return nil
+    }
+    
+    private var canEditRules: Bool {
+        gameEngine.canEditRules
     }
 
     var body: some View {
@@ -977,128 +1394,153 @@ struct GameRulesEditorView: View {
                 VStack(spacing: 24) {
                     // Header
                     VStack(spacing: 8) {
-                        Text("⚙️ Edit Game Rules")
-                            .font(.largeTitle)
-                            .fontWeight(.bold)
+                        Image(systemName: "gearshape.2.fill")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                        
+                        Text("Edit Game Rules")
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
 
                         Text("Modify rules during gameplay")
-                            .font(.headline)
+                            .font(.system(size: 15, weight: .regular, design: .rounded))
                             .foregroundColor(.secondary)
                     }
                     .padding(.top)
 
                     VStack(spacing: 20) {
-                        // Winning Score (conditional editing)
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Winning Score:")
-                                .fontWeight(.medium)
-
-                            if canChangeWinningScore {
-                                Picker("Winning Score", selection: $gameEngine.winningScore) {
-                                    ForEach(availableWinningScores, id: \.self) { score in
-                                        Text("\(score.formatted()) points").tag(score)
-                                    }
-                                }
-                                .pickerStyle(MenuPickerStyle())
-                                .accentColor(.blue)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            } else {
-                                HStack {
-                                    Text("\(gameEngine.winningScore.formatted()) points")
-                                        .padding()
-                                        .background(FarkleTheme.accentBackground)
-                                        .cornerRadius(8)
-
-                                    Spacer()
-                                }
-
-                                Text("Cannot change winning score when players are close to winning")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .italic()
-                            }
-                        }
+                        // MARK: - Winning Score
+                        InlineNumberStepperRow(
+                            label: "Winning Score",
+                            value: $gameEngine.winningScore,
+                            range: winningScoreRange,
+                            step: 1000,
+                            defaultValue: 10000,
+                            subtitle: "First to reach this score triggers final round",
+                            isEnabled: canEditWinningScore,
+                            disabledReason: winningScoreDisabledReason
+                        )
 
                         Divider()
 
-                        // Opening Score Requirement (always editable)
-                        VStack(alignment: .leading, spacing: 8) {
-                            Toggle("Require Opening Score", isOn: $gameEngine.require500Opening)
-                                .fontWeight(.medium)
+                        // MARK: - Opening Score Requirement
+                        VStack(alignment: .leading, spacing: 12) {
+                            Toggle(isOn: $gameEngine.require500Opening) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Require Opening Score")
+                                        .font(.system(size: 17, weight: .regular, design: .rounded))
+                                        .foregroundStyle(canEditRules ? .primary : .secondary)
+                                    Text("Players must score this in one turn to get on the board")
+                                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .disabled(!canEditRules)
+                            .onChange(of: gameEngine.require500Opening) { oldValue, newValue in
+                                // When turning OFF, set all players on board
+                                if oldValue && !newValue {
+                                    gameEngine.setAllPlayersOnBoard()
+                                }
+                            }
 
                             if gameEngine.require500Opening {
-                                HStack {
-                                    Text("Opening Score Threshold:")
-                                        .font(.subheadline)
-                                        .foregroundColor(.secondary)
-
-                                    Spacer()
-
-                                    Picker("Opening Score", selection: $gameEngine.openingScoreThreshold) {
-                                        Text("350").tag(350)
-                                        Text("500").tag(500)
-                                        Text("750").tag(750)
-                                        Text("1,000").tag(1000)
-                                    }
-                                    .pickerStyle(MenuPickerStyle())
-                                }
-                                .padding(.leading, 20)
+                                InlineNumberStepperRow(
+                                    label: "Threshold",
+                                    value: $gameEngine.openingScoreThreshold,
+                                    range: 100...2000,
+                                    step: 50,
+                                    defaultValue: 500,
+                                    isEnabled: canEditRules,
+                                    disabledReason: gameEngine.editingDisabledReason
+                                )
+                                .padding(.leading, 16)
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                             }
                         }
+                        .animation(.easeInOut(duration: 0.2), value: gameEngine.require500Opening)
 
                         Divider()
 
-                        // Triple Farkle Rule (always editable)
-                        VStack(alignment: .leading, spacing: 8) {
-                            Toggle("Triple Farkle Penalty", isOn: $gameEngine.enableTripleFarkleRule)
-                                .fontWeight(.medium)
+                        // MARK: - Triple Farkle Penalty
+                        VStack(alignment: .leading, spacing: 12) {
+                            Toggle(isOn: $gameEngine.enableTripleFarkleRule) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Triple Farkle Penalty")
+                                        .font(.system(size: 17, weight: .regular, design: .rounded))
+                                        .foregroundStyle(canEditRules ? .primary : .secondary)
+                                    Text("Three farkles in a row deducts points")
+                                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .disabled(!canEditRules)
 
                             if gameEngine.enableTripleFarkleRule {
-                                HStack {
-                                    Text("Penalty Amount:")
-                                        .font(.subheadline)
-                                        .foregroundColor(.secondary)
-
-                                    Spacer()
-
-                                    Picker("Penalty", selection: $gameEngine.tripleFarklePenalty) {
-                                        Text("500").tag(500)
-                                        Text("1,000").tag(1000)
-                                        Text("1,500").tag(1500)
-                                    }
-                                    .pickerStyle(MenuPickerStyle())
-                                }
-                                .padding(.leading, 20)
+                                InlineNumberStepperRow(
+                                    label: "Penalty Amount",
+                                    value: $gameEngine.tripleFarklePenalty,
+                                    range: 100...5000,
+                                    step: 100,
+                                    defaultValue: 1000,
+                                    isEnabled: canEditRules,
+                                    disabledReason: gameEngine.editingDisabledReason
+                                )
+                                .padding(.leading, 16)
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                             }
                         }
+                        .animation(.easeInOut(duration: 0.2), value: gameEngine.enableTripleFarkleRule)
 
-                        // Info section
+                        // Host-only banner (in multiplayer)
+                        if !canEditRules, let reason = gameEngine.editingDisabledReason {
+                            HStack(spacing: 10) {
+                                Image(systemName: "lock.shield.fill")
+                                    .foregroundStyle(.orange)
+                                Text(reason)
+                                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.orange)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.orange.opacity(0.1))
+                            .cornerRadius(12)
+                        }
+                        
+                        // MARK: - Info Section
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Image(systemName: "info.circle.fill")
                                     .foregroundColor(FarkleTheme.buttonPrimary)
                                 Text("Rule Change Policy")
-                                    .fontWeight(.medium)
+                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
                             }
 
-                            Text("• Opening score and triple farkle rules can be changed at any time")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            Text("• Winning score can only be increased above current player scores")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            VStack(alignment: .leading, spacing: 4) {
+                                RulePolicyRow(
+                                    icon: "checkmark.circle",
+                                    text: "Opening score and triple farkle can be changed anytime"
+                                )
+                                RulePolicyRow(
+                                    icon: "arrow.up.circle",
+                                    text: "Winning score must stay above the leader's score"
+                                )
+                                RulePolicyRow(
+                                    icon: "person.2.circle",
+                                    text: "Turning off opening requirement puts all players on board"
+                                )
+                                RulePolicyRow(
+                                    icon: "network",
+                                    text: "In multiplayer, only the host can edit rules"
+                                )
+                            }
                         }
                         .padding()
                         .background(FarkleTheme.accentBackground)
-                        .cornerRadius(10)
+                        .cornerRadius(12)
                     }
                     .padding()
-                    .background(FarkleTheme.cardBackground.opacity(0.8))
-                    .cornerRadius(15)
-                    .shadow(radius: 2)
+                    .background(FarkleTheme.cardBackground)
+                    .cornerRadius(16)
+                    .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: 2)
                 }
                 .padding()
             }
@@ -1116,10 +1558,28 @@ struct GameRulesEditorView: View {
     }
 }
 
+/// Small helper for rule policy bullet points
+private struct RulePolicyRow: View {
+    let icon: String
+    let text: String
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            Text(text)
+                .font(.system(size: 13, weight: .regular, design: .rounded))
+                .foregroundColor(.secondary)
+        }
+    }
+}
+
 // Theme picker for light/dark mode
 struct ThemePickerView: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("appTheme") private var appTheme: String = "System"
+    @AppStorage("appTheme") private var appTheme: String = AppTheme.system.rawValue
 
     var body: some View {
         NavigationView {
@@ -1188,6 +1648,14 @@ struct ThemePickerView: View {
             return "Always use light appearance"
         case .dark:
             return "Always use dark appearance"
+        case .midnight:
+            return "Deep indigo dark theme"
+        case .sunset:
+            return "Warm orange light theme"
+        case .forest:
+            return "Nature-inspired dark theme"
+        case .ocean:
+            return "Cool cyan dark theme"
         }
     }
 }
@@ -1303,6 +1771,7 @@ struct ManualModeScoreboardView: View {
     @State private var isEditing = false
     @State private var editingPlayerName: String = ""
     @State private var editingPlayerID: UUID? = nil
+    @State private var scoreEditingPlayer: Player? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1379,6 +1848,7 @@ struct ManualModeScoreboardView: View {
                                     .foregroundColor(gameEngine.currentPlayer?.id == player.id ? FarkleTheme.buttonPrimary : FarkleTheme.textPrimary)
 
                                 if isEditing {
+                                    // Edit name button
                                     Button(action: {
                                         editingPlayerID = player.id
                                         editingPlayerName = player.name
@@ -1387,19 +1857,53 @@ struct ManualModeScoreboardView: View {
                                             .foregroundColor(FarkleTheme.buttonPrimary)
                                             .font(.caption)
                                     }
+                                    
+                                    // Edit score button (host-only in multiplayer)
+                                    if gameEngine.canEditRules {
+                                        Button {
+                                            scoreEditingPlayer = player
+                                        } label: {
+                                            Image(systemName: "number.circle")
+                                                .foregroundColor(.orange)
+                                                .font(.caption)
+                                        }
+                                    }
                                 }
                             }
                         }
 
-                        HStack(spacing: 8) {
-                            Text("Total: \(player.totalScore)")
-                                .font(.subheadline)
-                                .foregroundColor(FarkleTheme.textSecondary)
+                        // Tappable score area in edit mode (host-only in multiplayer)
+                        if isEditing && gameEngine.canEditRules {
+                            Button {
+                                scoreEditingPlayer = player
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Text("Total: \(player.totalScore)")
+                                        .font(.subheadline)
+                                        .foregroundColor(FarkleTheme.textSecondary)
 
-                            if player.roundScore > 0 {
-                                Text("Round: +\(player.roundScore)")
+                                    if player.roundScore > 0 {
+                                        Text("Round: +\(player.roundScore)")
+                                            .font(.subheadline)
+                                            .foregroundColor(FarkleTheme.buttonSecondary)
+                                    }
+                                    
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        } else {
+                            HStack(spacing: 8) {
+                                Text("Total: \(player.totalScore)")
                                     .font(.subheadline)
-                                    .foregroundColor(FarkleTheme.buttonSecondary)
+                                    .foregroundColor(FarkleTheme.textSecondary)
+
+                                if player.roundScore > 0 {
+                                    Text("Round: +\(player.roundScore)")
+                                        .font(.subheadline)
+                                        .foregroundColor(FarkleTheme.buttonSecondary)
+                                }
                             }
                         }
                     }
@@ -1434,6 +1938,16 @@ struct ManualModeScoreboardView: View {
                 }
             }
             .onMove(perform: isEditing ? movePlayer : nil)
+        }
+        .sheet(item: $scoreEditingPlayer) { player in
+            ScoreEditingSheet(player: player) { newTotal, newRound in
+                if newTotal != player.totalScore {
+                    gameEngine.setPlayerTotalScore(player.id, to: newTotal)
+                }
+                if newRound != player.roundScore {
+                    gameEngine.setPlayerRoundScore(player.id, to: newRound)
+                }
+            }
         }
     }
 

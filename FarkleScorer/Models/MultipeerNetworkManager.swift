@@ -1,6 +1,7 @@
 import Foundation
 import MultipeerConnectivity
 import Combine
+import UIKit
 
 class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObject {
 
@@ -9,44 +10,68 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
     @Published var isConnected: Bool = false
     @Published var connectedPeers: [NetworkPeer] = []
     @Published var connectionState: ConnectionState = .disconnected
+    @Published var discoveredHosts: [DiscoveredHost] = []
 
     var onMessageReceived: ((GameMessage, NetworkPeer) -> Void)?
     var onPeerConnected: ((NetworkPeer) -> Void)?
     var onPeerDisconnected: ((NetworkPeer) -> Void)?
 
+    // MARK: - Stable Device Identity
+    /// Stable UUID for this device (persisted across app launches)
+    let localDeviceId: String
+    
+    // MARK: - Current Game Info
+    private(set) var currentGameId: String = ""
+    private(set) var playerCount: Int = 0
+
     // MARK: - MultipeerConnectivity Properties
     private var peerID: MCPeerID
-    private var session: MCSession
+    private var session: MCSession?
     private var advertiser: MCNearbyServiceAdvertiser?
     private var browser: MCNearbyServiceBrowser?
     private let serviceType = "farkle-game"
 
-    // MARK: - Connection Management
+    // MARK: - Peer Identity Mapping
+    /// Maps MCPeerID to stable device ID (received via handshake)
+    private var peerToDeviceId: [MCPeerID: String] = [:]
+    /// Maps stable device ID to MCPeerID
+    private var deviceIdToPeer: [String: MCPeerID] = [:]
+    /// Maps MCPeerID to NetworkPeer
     private var peerMapping: [MCPeerID: NetworkPeer] = [:]
+    
+    // MARK: - Discovery State
+    /// Maps MCPeerID to DiscoveredHost (for browsing clients)
+    private var discoveredPeers: [MCPeerID: DiscoveredHost] = [:]
+    /// Pending connection target (when user selects a host)
+    private var pendingConnectionTarget: MCPeerID?
+
+    // MARK: - Connection Management
     private var connectionTimer: Timer?
     private var pingTimer: Timer?
     private let maxReconnectAttempts = 3
     private var reconnectAttempts: [MCPeerID: Int] = [:]
-
-    // MARK: - Battery Optimization
-    private var lastMessageTime: Date = Date()
-    private let messageThrottleInterval: TimeInterval = 0.1 // Limit messages to 10/second
+    
+    // MARK: - Handshake State
+    private var pendingHandshakes: Set<MCPeerID> = []
+    private var completedHandshakes: Set<MCPeerID> = []
 
     override init() {
-        // Create unique peer ID based on device name
+        // Load or create stable device ID
+        if let savedId = UserDefaults.standard.string(forKey: "stableDeviceId") {
+            self.localDeviceId = savedId
+        } else {
+            let newId = UUID().uuidString
+            UserDefaults.standard.set(newId, forKey: "stableDeviceId")
+            self.localDeviceId = newId
+        }
+        
+        // Create peer ID with device name (for display) but we use localDeviceId for identity
         let deviceName = UIDevice.current.name
         self.peerID = MCPeerID(displayName: deviceName)
 
-        // Initialize session with security settings for battery optimization
-        self.session = MCSession(
-            peer: peerID,
-            securityIdentity: nil,
-            encryptionPreference: .none // Faster, uses less battery for local network
-        )
-
         super.init()
-
-        session.delegate = self
+        
+        createSession()
         startPingTimer()
     }
 
@@ -55,20 +80,42 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
         connectionTimer?.invalidate()
         pingTimer?.invalidate()
     }
+    
+    // MARK: - Session Management
+    
+    private func createSession() {
+        // Use encrypted sessions for security (required for App Store)
+        session = MCSession(
+            peer: peerID,
+            securityIdentity: nil,
+            encryptionPreference: .required
+        )
+        session?.delegate = self
+    }
+    
+    private func recreateSession() {
+        session?.disconnect()
+        session = nil
+        createSession()
+    }
 
     // MARK: - NetworkManagerProtocol Implementation
 
     func startHosting(gameId: String) {
         stopCurrentNetworking()
+        recreateSession()
 
         isHost = true
+        currentGameId = gameId
         connectionState = .hosting
 
-        // Create advertiser with game metadata
-        let discoveryInfo = [
+        // Create advertiser with game metadata including stable device ID
+        let discoveryInfo: [String: String] = [
             "gameId": gameId,
+            "deviceId": localDeviceId,
             "hostName": peerID.displayName,
-            "version": "1.0"
+            "version": ProtocolConstants.appVersion,
+            "playerCount": "0"
         ]
 
         advertiser = MCNearbyServiceAdvertiser(
@@ -80,30 +127,95 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
         advertiser?.delegate = self
         advertiser?.startAdvertisingPeer()
 
-        print("🎮 Started hosting Farkle game: \(gameId)")
+        print("🎮 Started hosting Farkle game: \(gameId) [deviceId: \(localDeviceId.prefix(8))...]")
+    }
+    
+    /// Update the advertised player count (call when players change)
+    func updateAdvertisedPlayerCount(_ count: Int) {
+        guard isHost else { return }
+        playerCount = count
+        
+        // Restart advertiser with updated info
+        advertiser?.stopAdvertisingPeer()
+        
+        let discoveryInfo: [String: String] = [
+            "gameId": currentGameId,
+            "deviceId": localDeviceId,
+            "hostName": peerID.displayName,
+            "version": ProtocolConstants.appVersion,
+            "playerCount": "\(count)"
+        ]
+        
+        advertiser = MCNearbyServiceAdvertiser(
+            peer: peerID,
+            discoveryInfo: discoveryInfo,
+            serviceType: serviceType
+        )
+        advertiser?.delegate = self
+        advertiser?.startAdvertisingPeer()
     }
 
     func startBrowsing() {
         stopCurrentNetworking()
+        recreateSession()
 
         isHost = false
         connectionState = .browsing
+        discoveredHosts.removeAll()
+        discoveredPeers.removeAll()
 
         browser = MCNearbyServiceBrowser(peer: peerID, serviceType: serviceType)
         browser?.delegate = self
         browser?.startBrowsingForPeers()
 
-        print("🔍 Started browsing for Farkle games")
+        print("🔍 Started browsing for Farkle games [deviceId: \(localDeviceId.prefix(8))...]")
+    }
+    
+    func connectToHost(_ host: DiscoveredHost) {
+        guard let mcPeerID = discoveredPeers.first(where: { $0.value.id == host.id })?.key else {
+            print("❌ Cannot connect: host not found in discovered peers")
+            return
+        }
+        
+        guard let session = session else {
+            print("❌ Cannot connect: no session")
+            return
+        }
+        
+        pendingConnectionTarget = mcPeerID
+        connectionState = .connecting
+        
+        // Create context with our device ID for the handshake
+        let contextData: [String: String] = [
+            "deviceId": localDeviceId,
+            "displayName": peerID.displayName,
+            "version": ProtocolConstants.appVersion
+        ]
+        
+        let context = try? JSONEncoder().encode(contextData)
+        
+        // Send invitation to the specific host
+        browser?.invitePeer(mcPeerID, to: session, withContext: context, timeout: 30)
+        
+        print("📤 Sent connection request to: \(host.displayName)")
     }
 
     func stopNetworking() {
         stopCurrentNetworking()
-        session.disconnect()
+        session?.disconnect()
         connectionState = .disconnected
         isConnected = false
         connectedPeers.removeAll()
         peerMapping.removeAll()
+        peerToDeviceId.removeAll()
+        deviceIdToPeer.removeAll()
+        discoveredHosts.removeAll()
+        discoveredPeers.removeAll()
+        pendingHandshakes.removeAll()
+        completedHandshakes.removeAll()
         reconnectAttempts.removeAll()
+        pendingConnectionTarget = nil
+        currentGameId = ""
 
         print("📴 Stopped all networking")
     }
@@ -113,14 +225,8 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
     }
 
     func sendMessage(_ message: GameMessage, to peers: [NetworkPeer]?) {
-        guard !connectedPeers.isEmpty else { return }
-
-        // Battery optimization: throttle messages
-        let now = Date()
-        if now.timeIntervalSince(lastMessageTime) < messageThrottleInterval {
-            return
-        }
-        lastMessageTime = now
+        guard let session = session else { return }
+        guard !peerMapping.isEmpty else { return }
 
         do {
             let data = try JSONEncoder().encode(message)
@@ -129,7 +235,7 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
             let targetPeers: [MCPeerID]
             if let specificPeers = peers {
                 targetPeers = specificPeers.compactMap { networkPeer in
-                    peerMapping.first { $0.value.id == networkPeer.id }?.key
+                    deviceIdToPeer[networkPeer.id]
                 }
             } else {
                 targetPeers = Array(peerMapping.keys)
@@ -137,14 +243,19 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
 
             guard !targetPeers.isEmpty else { return }
 
-            // Send with reliable delivery for important messages, unreliable for frequent updates
-            let mode: MCSessionSendDataMode = isImportantMessage(message) ? .reliable : .unreliable
+            // Determine delivery mode based on message importance
+            let mode: MCSessionSendDataMode = messageDeliveryMode(for: message)
 
             try session.send(data, toPeers: targetPeers, with: mode)
 
         } catch {
             print("❌ Failed to send message: \(error)")
         }
+    }
+    
+    /// Send a message that bypasses throttling (for critical messages)
+    func sendMessageImmediately(_ message: GameMessage, to peers: [NetworkPeer]?) {
+        sendMessage(message, to: peers)
     }
 
     // MARK: - Private Methods
@@ -158,20 +269,33 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
         connectionTimer = nil
     }
 
-    private func isImportantMessage(_ message: GameMessage) -> Bool {
+    /// Determine delivery mode based on message type
+    /// Critical messages use reliable delivery, frequent updates can use unreliable
+    private func messageDeliveryMode(for message: GameMessage) -> MCSessionSendDataMode {
         switch message {
-        case .gameStateSync, .gameStarted, .gameEnded:
-            return false // These can be sent unreliably for better performance
-        case .playerAction, .playerJoined, .playerLeft:
-            return true // These need guaranteed delivery
+        // Critical messages - must be delivered reliably
+        case .hello, .welcome, .requestFullSync:
+            return .reliable
+        case .roundStateSync, .turnSubmission, .forceAdvanceRound, .roundStarted:
+            return .reliable
+        case .gameStarted, .gameEnded, .playerJoined, .playerLeft:
+            return .reliable
+        case .playerAction:
+            return .reliable
+        case .gameStateSync:
+            return .reliable  // Changed: state sync is critical
+            
+        // Non-critical messages - can use unreliable for performance
+        case .turnProgress:
+            return .unreliable  // Frequent updates, okay to drop some
         case .ping, .pong:
-            return false
+            return .unreliable
         }
     }
 
-    private func createNetworkPeer(from mcPeerID: MCPeerID, isHost: Bool = false) -> NetworkPeer {
+    private func createNetworkPeer(from mcPeerID: MCPeerID, deviceId: String, isHost: Bool) -> NetworkPeer {
         return NetworkPeer(
-            id: mcPeerID.displayName,
+            id: deviceId,
             displayName: mcPeerID.displayName,
             isHost: isHost
         )
@@ -190,8 +314,17 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
 
     private func handlePeerDisconnection(_ peerID: MCPeerID) {
         guard let networkPeer = peerMapping[peerID] else { return }
+        
+        let deviceId = peerToDeviceId[peerID]
 
         peerMapping.removeValue(forKey: peerID)
+        peerToDeviceId.removeValue(forKey: peerID)
+        if let deviceId = deviceId {
+            deviceIdToPeer.removeValue(forKey: deviceId)
+        }
+        pendingHandshakes.remove(peerID)
+        completedHandshakes.remove(peerID)
+        
         connectedPeers.removeAll { $0.id == networkPeer.id }
 
         if connectedPeers.isEmpty {
@@ -201,7 +334,7 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
 
         onPeerDisconnected?(networkPeer)
 
-        print("👋 Peer disconnected: \(networkPeer.displayName)")
+        print("👋 Peer disconnected: \(networkPeer.displayName) [deviceId: \(networkPeer.id.prefix(8))...]")
 
         // If we're not the host and the host disconnected, reset to browsing
         if !isHost && networkPeer.isHost {
@@ -228,6 +361,72 @@ class MultipeerNetworkManager: NSObject, NetworkManagerProtocol, ObservableObjec
             }
         }
     }
+    
+    // MARK: - Handshake Processing
+    
+    /// Process incoming hello from a client (host side)
+    func processHello(_ helloData: HelloData, from mcPeerID: MCPeerID) {
+        guard isHost else { return }
+        
+        // Register the peer's device ID
+        peerToDeviceId[mcPeerID] = helloData.deviceId
+        deviceIdToPeer[helloData.deviceId] = mcPeerID
+        
+        // Create and store the network peer
+        let networkPeer = createNetworkPeer(from: mcPeerID, deviceId: helloData.deviceId, isHost: false)
+        peerMapping[mcPeerID] = networkPeer
+        
+        if !connectedPeers.contains(where: { $0.id == networkPeer.id }) {
+            connectedPeers.append(networkPeer)
+        }
+        
+        completedHandshakes.insert(mcPeerID)
+        pendingHandshakes.remove(mcPeerID)
+        
+        isConnected = true
+        connectionState = .connected
+        
+        print("✅ Handshake complete with client: \(helloData.displayName) [deviceId: \(helloData.deviceId.prefix(8))...]")
+        
+        onPeerConnected?(networkPeer)
+    }
+    
+    /// Process incoming welcome from host (client side)
+    func processWelcome(_ welcomeData: WelcomeData, from mcPeerID: MCPeerID) {
+        guard !isHost else { return }
+        
+        // Register the host's device ID
+        peerToDeviceId[mcPeerID] = welcomeData.hostDeviceId
+        deviceIdToPeer[welcomeData.hostDeviceId] = mcPeerID
+        
+        // Create and store the network peer (as host)
+        let networkPeer = createNetworkPeer(from: mcPeerID, deviceId: welcomeData.hostDeviceId, isHost: true)
+        peerMapping[mcPeerID] = networkPeer
+        
+        if !connectedPeers.contains(where: { $0.id == networkPeer.id }) {
+            connectedPeers.append(networkPeer)
+        }
+        
+        completedHandshakes.insert(mcPeerID)
+        pendingHandshakes.remove(mcPeerID)
+        
+        isConnected = true
+        connectionState = .connected
+        
+        print("✅ Received welcome from host: \(mcPeerID.displayName) [deviceId: \(welcomeData.hostDeviceId.prefix(8))...]")
+        
+        onPeerConnected?(networkPeer)
+    }
+    
+    /// Get the MCPeerID for a device ID
+    func getMCPeerID(for deviceId: String) -> MCPeerID? {
+        return deviceIdToPeer[deviceId]
+    }
+    
+    /// Get the device ID for an MCPeerID
+    func getDeviceId(for mcPeerID: MCPeerID) -> String? {
+        return peerToDeviceId[mcPeerID]
+    }
 }
 
 // MARK: - MCSessionDelegate
@@ -242,22 +441,25 @@ extension MultipeerNetworkManager: MCSessionDelegate {
             case .connecting:
                 print("🤝 Connecting to: \(peerID.displayName)")
                 self.connectionState = .connecting
+                self.pendingHandshakes.insert(peerID)
 
             case .connected:
-                print("✅ Connected to: \(peerID.displayName)")
-
-                let networkPeer = self.createNetworkPeer(from: peerID, isHost: !self.isHost)
-                self.peerMapping[peerID] = networkPeer
-
-                if !self.connectedPeers.contains(where: { $0.id == networkPeer.id }) {
-                    self.connectedPeers.append(networkPeer)
+                print("🔗 Session connected to: \(peerID.displayName)")
+                
+                // For clients: send hello to initiate handshake
+                if !self.isHost {
+                    let hello = HelloData(
+                        deviceId: self.localDeviceId,
+                        displayName: self.peerID.displayName,
+                        appVersion: ProtocolConstants.appVersion,
+                        gameId: self.currentGameId
+                    )
+                    self.sendMessage(.hello(hello), to: nil)
+                    print("📤 Sent hello to host")
                 }
-
-                self.isConnected = true
-                self.connectionState = .connected
+                
+                // Don't set connected state yet - wait for handshake
                 self.reconnectAttempts.removeValue(forKey: peerID)
-
-                self.onPeerConnected?(networkPeer)
 
             case .notConnected:
                 print("❌ Disconnected from: \(peerID.displayName)")
@@ -271,21 +473,48 @@ extension MultipeerNetworkManager: MCSessionDelegate {
     }
 
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        guard let networkPeer = peerMapping[peerID] else { return }
-
         do {
             let message = try JSONDecoder().decode(GameMessage.self, from: data)
 
             DispatchQueue.main.async { [weak self] in
-                // Handle ping/pong for connection health
+                guard let self = self else { return }
+                
+                // Handle ping/pong internally
                 if case .ping = message {
-                    self?.sendMessage(.pong, to: [networkPeer])
+                    if let networkPeer = self.peerMapping[peerID] {
+                        self.sendMessage(.pong, to: [networkPeer])
+                    }
                     return
                 } else if case .pong = message {
-                    return // Just acknowledge the pong
+                    return
+                }
+                
+                // Handle handshake messages
+                if case .hello(let helloData) = message {
+                    self.processHello(helloData, from: peerID)
+                    // Forward to game engine for welcome response
+                    if let networkPeer = self.peerMapping[peerID] {
+                        self.onMessageReceived?(message, networkPeer)
+                    }
+                    return
+                }
+                
+                if case .welcome(let welcomeData) = message {
+                    self.processWelcome(welcomeData, from: peerID)
+                    // Forward to game engine for state setup
+                    if let networkPeer = self.peerMapping[peerID] {
+                        self.onMessageReceived?(message, networkPeer)
+                    }
+                    return
+                }
+                
+                // For other messages, require completed handshake
+                guard let networkPeer = self.peerMapping[peerID] else {
+                    print("⚠️ Received message from unknown peer: \(peerID.displayName)")
+                    return
                 }
 
-                self?.onMessageReceived?(message, networkPeer)
+                self.onMessageReceived?(message, networkPeer)
             }
 
         } catch {
@@ -312,10 +541,23 @@ extension MultipeerNetworkManager: MCNearbyServiceAdvertiserDelegate {
 
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
 
-        print("📨 Received invitation from: \(peerID.displayName)")
+        print("📨 Received connection request from: \(peerID.displayName)")
+        
+        // Parse context to get client's device ID
+        var clientDeviceId: String?
+        if let context = context,
+           let contextData = try? JSONDecoder().decode([String: String].self, from: context) {
+            clientDeviceId = contextData["deviceId"]
+            print("   Client deviceId: \(clientDeviceId?.prefix(8) ?? "unknown")...")
+        }
 
-        // Auto-accept invitations as host
+        // Accept the invitation
         invitationHandler(true, session)
+        
+        // Store pending handshake info
+        pendingHandshakes.insert(peerID)
+        
+        // Note: Full handshake completes when we receive their hello message
     }
 
     func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
@@ -331,15 +573,56 @@ extension MultipeerNetworkManager: MCNearbyServiceAdvertiserDelegate {
 extension MultipeerNetworkManager: MCNearbyServiceBrowserDelegate {
 
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String : String]?) {
-
-        print("🎯 Found game host: \(peerID.displayName)")
-
-        // Auto-invite to join the game
-        browser.invitePeer(peerID, to: session, withContext: nil, timeout: 10)
+        
+        guard let info = info else {
+            print("⚠️ Found peer without discovery info: \(peerID.displayName)")
+            return
+        }
+        
+        // Extract host information
+        let gameId = info["gameId"] ?? "Unknown"
+        let deviceId = info["deviceId"] ?? peerID.displayName
+        let hostName = info["hostName"] ?? peerID.displayName
+        let version = info["version"] ?? "1.0"
+        let playerCount = Int(info["playerCount"] ?? "0") ?? 0
+        
+        print("🎯 Found game host: \(hostName) [gameId: \(gameId), deviceId: \(deviceId.prefix(8))...]")
+        
+        // Create discovered host entry
+        let discoveredHost = DiscoveredHost(
+            id: deviceId,
+            displayName: hostName,
+            gameId: gameId,
+            playerCount: playerCount,
+            appVersion: version
+        )
+        
+        // Store mapping and update published list
+        discoveredPeers[peerID] = discoveredHost
+        
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Update or add to discovered hosts list
+            if let existingIndex = self.discoveredHosts.firstIndex(where: { $0.id == deviceId }) {
+                self.discoveredHosts[existingIndex] = discoveredHost
+            } else {
+                self.discoveredHosts.append(discoveredHost)
+            }
+        }
     }
 
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
         print("📡 Lost peer: \(peerID.displayName)")
+        
+        // Remove from discovered hosts
+        if let discoveredHost = discoveredPeers[peerID] {
+            discoveredPeers.removeValue(forKey: peerID)
+            
+            DispatchQueue.main.async { [weak self] in
+                self?.discoveredHosts.removeAll { $0.id == discoveredHost.id }
+            }
+        }
     }
 
     func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {

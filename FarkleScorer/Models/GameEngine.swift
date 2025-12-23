@@ -24,17 +24,67 @@ class GameEngine: ObservableObject {
     @Published var openingScoreThreshold: Int = 500
     @Published var enableTripleFarkleRule: Bool = false
     @Published var tripleFarklePenalty: Int = 1000
+    
+    // MARK: - Scoring Rules (House Rules)
+    @Published var scoringRulesStore: ScoringRulesStore = ScoringRulesStore.load() {
+        didSet {
+            // Rebuild scoring engine when rules change
+            rebuildScoringEngine()
+        }
+    }
+    
+    // MARK: - Multiplayer Control (set by MultiplayerGameEngine)
+    /// Whether this device can edit game rules (host-only in multiplayer)
+    @Published var canEditRules: Bool = true
+    /// Reason why editing is disabled (for UI display)
+    @Published var editingDisabledReason: String? = nil
 
     // MARK: - Farkle Acknowledgment
     @Published var pendingFarkle: Bool = false
     @Published var farklePlayerName: String = ""
     @Published var farkleDice: [Int] = []
 
-    // MARK: - Undo Functionality
+    // MARK: - Undo Functionality (bounded stack for reversible actions only)
     @Published var canUndo: Bool = false
     @Published var invalidSelectionWarning: Bool = false
+    
+    /// Bounded undo stack - only stores reversible action snapshots
+    /// Does NOT allow undoing: dice rolls, banked scores, turn advances
+    private var undoStack: [UndoSnapshot] = []
+    private let maxUndoStackSize = 30
+    
+    /// Types of actions that can be undone (fair-play policy)
+    enum UndoableAction: String {
+        case diceSelection = "diceSelection"
+        case continueRolling = "continueRolling"
+        case manualScoreAdd = "manualScoreAdd"
+        case manualScoreRemove = "manualScoreRemove"
+        case manualScoreClear = "manualScoreClear"
+    }
+    
+    /// Snapshot of game state for undo - only captures what's needed for fair-play undos
+    private struct UndoSnapshot {
+        let action: UndoableAction
+        let timestamp: Date
+        
+        // Dice mode state
+        let currentRoll: [Int]
+        let selectedDice: [Int]
+        let turnScore: Int
+        let remainingDice: Int
+        let playerTurnHistory: [Turn]
+        let playerRoundScore: Int
+        
+        // Manual mode state
+        let manualTurnScore: Int
+        let manualScoreHistory: [Int]
+        
+        // Player state (for more complex undos)
+        let currentPlayerIndex: Int
+    }
+    
+    // Legacy single-state undo (kept for backward compatibility during transition)
     private var undoState: UndoState?
-
     private struct UndoState {
         let currentRoll: [Int]
         let selectedDice: [Int]
@@ -45,7 +95,7 @@ class GameEngine: ObservableObject {
     }
 
     // MARK: - Private Properties
-    private let scoringEngine: ScoringEngine
+    private var scoringEngine: ScoringEngine
     private var gameWinner: Player?
     private var finalRoundStarted: Bool = false
     private var finalRoundTriggerPlayerIndex: Int = -1
@@ -53,7 +103,69 @@ class GameEngine: ObservableObject {
 
     // MARK: - Initialization
     init() {
-        self.scoringEngine = ScoringEngine()
+        // Load saved scoring rules and build engine
+        let savedRules = ScoringRulesStore.load()
+        self.scoringEngine = ScoringEngine(rules: savedRules.toScoringRules())
+        self.scoringRulesStore = savedRules
+    }
+    
+    /// Rebuild the scoring engine with current rules (called when rules change)
+    private func rebuildScoringEngine() {
+        scoringEngine = ScoringEngine(rules: scoringRulesStore.toScoringRules())
+    }
+    
+    /// Save current scoring rules to persistence
+    func saveScoringRules() {
+        scoringRulesStore.save()
+        logGameEvent("Scoring rules updated")
+    }
+    
+    /// Reset scoring rules to official defaults
+    func resetScoringRulesToDefaults() {
+        ScoringRulesStore.resetToDefaults()
+        scoringRulesStore = ScoringRulesStore()
+        logGameEvent("Scoring rules reset to official defaults")
+    }
+    
+    // MARK: - State Invariants (DEBUG checks to catch bugs early)
+    
+    /// Verifies that the game state is consistent. Called in DEBUG builds.
+    private func checkInvariants() {
+        #if DEBUG
+        // Invariant 1: When game is active, must have at least one player
+        if gameState != .setup {
+            assert(!players.isEmpty, "Game state \(gameState) requires at least one player")
+        }
+        
+        // Invariant 2: currentPlayerIndex must be in bounds when playing
+        if gameState == .playing || gameState == .finalRound {
+            assert(currentPlayerIndex < players.count, 
+                   "currentPlayerIndex (\(currentPlayerIndex)) out of bounds (players.count: \(players.count))")
+        }
+        
+        // Invariant 3: In manual mode, currentRoll should be empty (we're not using digital dice)
+        if isManualMode && gameState != .setup {
+            // This is a soft invariant - log warning but don't crash
+            if !currentRoll.isEmpty {
+                print("⚠️ Warning: currentRoll should be empty in manual mode")
+            }
+        }
+        
+        // Invariant 4: When pendingFarkle is true, farkleDice should not be empty
+        if pendingFarkle {
+            assert(!farkleDice.isEmpty, "pendingFarkle is true but farkleDice is empty")
+        }
+        
+        // Invariant 5: remainingDice should be 1-6
+        assert(remainingDice >= 1 && remainingDice <= 6, 
+               "remainingDice (\(remainingDice)) out of valid range 1-6")
+        #endif
+    }
+    
+    /// Safely advances currentPlayerIndex, ensuring it stays in bounds
+    private func safeAdvancePlayerIndex() {
+        guard !players.isEmpty else { return }
+        currentPlayerIndex = (currentPlayerIndex + 1) % players.count
     }
 
     // MARK: - Game State Management
@@ -144,6 +256,9 @@ class GameEngine: ObservableObject {
         currentPlayerIndex = 0
         resetTurn()
         logGameEvent("Game started with \(players.count) player\(players.count == 1 ? "" : "s")")
+        
+        // Verify invariants after game start
+        checkInvariants()
     }
 
     func resetGame() {
@@ -156,6 +271,38 @@ class GameEngine: ObservableObject {
         playersCompletedFinalRound.removeAll()
         gameWinner = nil
         resetTurn()
+    }
+    
+    /// Restart the game with the same players and rules - just reset scores
+    /// This is the "Play Again" flow that reduces taps between games
+    func restartGame() {
+        guard !players.isEmpty else {
+            // Fallback to full reset if no players
+            resetGame()
+            return
+        }
+        
+        // Reset each player's scores and history while keeping their name
+        for index in players.indices {
+            players[index].totalScore = 0
+            players[index].roundScore = 0
+            players[index].gameHistory.removeAll()
+            players[index].consecutiveFarkles = 0
+            // Reset "on board" status based on current rule setting
+            players[index].isOnBoard = !require500Opening
+        }
+        
+        // Reset game state
+        currentPlayerIndex = 0
+        gameState = .playing
+        gameHistory.removeAll()
+        finalRoundStarted = false
+        finalRoundTriggerPlayerIndex = -1
+        playersCompletedFinalRound.removeAll()
+        gameWinner = nil
+        resetTurn()
+        
+        logGameEvent("Game restarted with \(players.count) player\(players.count == 1 ? "" : "s")")
     }
 
     // MARK: - Turn Management
@@ -173,9 +320,8 @@ class GameEngine: ObservableObject {
         currentRoll = newRoll
         selectedDice = []
 
-        // Clear undo state once new dice are rolled
-        canUndo = false
-        undoState = nil
+        // Rolling dice is irreversible - clear undo stack (fair-play policy)
+        clearUndoStack()
 
         // Check if player farkled
         if !canScoreAnyDice(newRoll) {
@@ -192,6 +338,9 @@ class GameEngine: ObservableObject {
 
     func bankScore() {
         guard let player = currentPlayer else { return }
+        
+        // Banking is irreversible - clear undo stack (fair-play policy)
+        clearUndoStack()
 
         if isManualMode {
             // Bank manual score
@@ -245,17 +394,8 @@ class GameEngine: ObservableObject {
             return // Cannot continue without selecting at least one scoring die
         }
 
-        // Save current state for undo functionality
-        if let playerIndex = getCurrentPlayerIndex() {
-            undoState = UndoState(
-                currentRoll: currentRoll,
-                selectedDice: selectedDice,
-                turnScore: turnScore,
-                remainingDice: remainingDice,
-                playerTurnHistory: players[playerIndex].gameHistory,
-                playerRoundScore: players[playerIndex].roundScore
-            )
-        }
+        // Save current state for undo functionality (using new stack-based system)
+        saveStateForUndo(action: .continueRolling)
 
         // Calculate remaining dice correctly
         // Start with current roll count, subtract selected dice
@@ -282,27 +422,69 @@ class GameEngine: ObservableObject {
         // Reset for next roll and enable undo (until they roll again)
         currentRoll = []
         selectedDice = []
-        canUndo = true
+        updateCanUndo()
     }
 
     func undoLastSelection() {
-        guard let undoState = undoState, canUndo else { return }
+        guard canUndo, let snapshot = undoStack.popLast() else { return }
 
-        // Restore previous state
-        currentRoll = undoState.currentRoll
-        selectedDice = undoState.selectedDice
-        turnScore = undoState.turnScore
-        remainingDice = undoState.remainingDice
+        // Restore state from snapshot
+        currentRoll = snapshot.currentRoll
+        selectedDice = snapshot.selectedDice
+        turnScore = snapshot.turnScore
+        remainingDice = snapshot.remainingDice
+        manualTurnScore = snapshot.manualTurnScore
+        manualScoreHistory = snapshot.manualScoreHistory
 
         // Restore player state
-        if let playerIndex = getCurrentPlayerIndex() {
-            players[playerIndex].gameHistory = undoState.playerTurnHistory
-            players[playerIndex].roundScore = undoState.playerRoundScore
+        if let playerIndex = getCurrentPlayerIndex(), playerIndex < players.count {
+            players[playerIndex].gameHistory = snapshot.playerTurnHistory
+            players[playerIndex].roundScore = snapshot.playerRoundScore
         }
 
-        // Clear undo state
-        self.undoState = nil
-        canUndo = false
+        // Update undo availability
+        updateCanUndo()
+    }
+    
+    // MARK: - Undo Stack Helpers
+    
+    /// Save current state to undo stack before a reversible action
+    private func saveStateForUndo(action: UndoableAction) {
+        guard let playerIndex = getCurrentPlayerIndex(), playerIndex < players.count else { return }
+        
+        let snapshot = UndoSnapshot(
+            action: action,
+            timestamp: Date(),
+            currentRoll: currentRoll,
+            selectedDice: selectedDice,
+            turnScore: turnScore,
+            remainingDice: remainingDice,
+            playerTurnHistory: players[playerIndex].gameHistory,
+            playerRoundScore: players[playerIndex].roundScore,
+            manualTurnScore: manualTurnScore,
+            manualScoreHistory: manualScoreHistory,
+            currentPlayerIndex: currentPlayerIndex
+        )
+        
+        undoStack.append(snapshot)
+        
+        // Enforce max stack size
+        if undoStack.count > maxUndoStackSize {
+            undoStack.removeFirst()
+        }
+        
+        updateCanUndo()
+    }
+    
+    /// Clear undo stack (called on irreversible actions like roll, bank, turn advance)
+    private func clearUndoStack() {
+        undoStack.removeAll()
+        updateCanUndo()
+    }
+    
+    /// Update the canUndo published property
+    private func updateCanUndo() {
+        canUndo = !undoStack.isEmpty
     }
 
     private func handleFarkle() {
@@ -346,13 +528,25 @@ class GameEngine: ObservableObject {
     }
 
     private func nextPlayer() {
+        // Guard against empty players array
+        guard !players.isEmpty else {
+            #if DEBUG
+            print("⚠️ nextPlayer called with empty players array")
+            #endif
+            return
+        }
+        
         // Mark current player as having completed their final round turn (if in final round)
         if finalRoundStarted {
             playersCompletedFinalRound.insert(currentPlayerIndex)
         }
 
-        currentPlayerIndex = (currentPlayerIndex + 1) % players.count
+        // Safely advance to next player
+        safeAdvancePlayerIndex()
         resetTurn()
+        
+        // Verify invariants after state transition
+        checkInvariants()
 
         // Check if final round is complete
         if finalRoundStarted {
@@ -373,20 +567,20 @@ class GameEngine: ObservableObject {
     }
 
     private func resetTurn() {
+        // Clear digital dice state
         currentRoll = []
         selectedDice = []
         remainingDice = 6
         turnScore = 0
 
-        // Clear undo state
-        canUndo = false
-        undoState = nil
+        // Clear manual/calculator state
+        // Since state is preserved across mode switches, we clear BOTH modes
+        // at true turn boundaries (new turn = fresh state in both modes)
+        manualTurnScore = 0
+        manualScoreHistory = []
 
-        // Only reset manual scoring if not in manual mode
-        if !isManualMode {
-            manualTurnScore = 0
-            manualScoreHistory = []
-        }
+        // Clear undo stack on turn reset (new turn = fresh state)
+        clearUndoStack()
     }
 
     // MARK: - Game Logic
@@ -427,23 +621,10 @@ class GameEngine: ObservableObject {
         return currentPlayerIndex
     }
 
-        func skipPlayer() {
-        logGameEvent("Skipped \(currentPlayer?.name ?? "Unknown")'s turn")
-
-        // Clear any pending farkle state when skipping
-        if pendingFarkle {
-            pendingFarkle = false
-            farklePlayerName = ""
-            farkleDice = []
-        }
-
-        // In manual mode, reset any inputted scores when skipping
-        if isManualMode {
-            manualTurnScore = 0
-            manualScoreHistory = []
-        }
-
-        nextPlayer()
+    /// Skip the current player's turn (legacy alias for skipTurn)
+    /// Prefer using skipTurn() directly for new code
+    func skipPlayer() {
+        skipTurn()
     }
 
     func goToPreviousPlayer() {
@@ -566,30 +747,50 @@ class GameEngine: ObservableObject {
         )
     }
 
+    // MARK: - Mode Switching & In-Progress State Helpers
+    
+    /// Whether there is an active digital dice turn in progress (roll/selection/score)
+    var hasDigitalTurnInProgress: Bool {
+        !currentRoll.isEmpty || !selectedDice.isEmpty || turnScore > 0
+    }
+    
+    /// Whether there is an active calculator/manual turn in progress (points entered)
+    var hasManualTurnInProgress: Bool {
+        manualTurnScore > 0 || !manualScoreHistory.isEmpty
+    }
+    
+    /// Whether switching modes would affect in-progress state in the current mode
+    var switchingModeWouldAffectProgress: Bool {
+        isManualMode ? hasManualTurnInProgress : hasDigitalTurnInProgress
+    }
+
     // MARK: - Manual Scoring Functions
 
+    /// Toggle between digital dice mode and calculator/manual mode.
+    /// State is preserved in both modes—switching does NOT clear progress.
     func toggleManualMode() {
         isManualMode.toggle()
-        if isManualMode {
-            // Clear dice-based scoring when switching to manual
-            currentRoll = []
-            selectedDice = []
-            turnScore = 0
-        } else {
-            // Clear manual scoring when switching to dice
-            manualTurnScore = 0
-            manualScoreHistory = []
-        }
+        // State is intentionally preserved across mode switches.
+        // The true turn boundaries (resetTurn, nextPlayer, bankScore, etc.)
+        // handle clearing state when appropriate.
     }
 
     func addManualScore(_ score: Int) {
         guard isManualMode && score > 0 else { return }
+        
+        // Save state for undo (reversible action)
+        saveStateForUndo(action: .manualScoreAdd)
+        
         manualScoreHistory.append(score)
         manualTurnScore += score
     }
 
     func removeLastManualScore() {
         guard isManualMode && !manualScoreHistory.isEmpty else { return }
+        
+        // Save state for undo (reversible action)
+        saveStateForUndo(action: .manualScoreRemove)
+        
         let lastScore = manualScoreHistory.removeLast()
         manualTurnScore -= lastScore
     }
@@ -597,6 +798,9 @@ class GameEngine: ObservableObject {
     func bankManualScore() {
         guard isManualMode && manualTurnScore > 0 else { return }
         guard let playerIndex = getCurrentPlayerIndex() else { return }
+        
+        // Banking is irreversible - clear undo stack (fair-play policy)
+        clearUndoStack()
 
         // Create a turn record for manual scoring
         let turn = Turn(
@@ -624,6 +828,9 @@ class GameEngine: ObservableObject {
 
     func farkleManualTurn() {
         guard isManualMode else { return }
+        
+        // Farkle is irreversible - clear undo stack
+        clearUndoStack()
 
         // Clear all accumulated scores for this turn
         manualTurnScore = 0
@@ -635,6 +842,58 @@ class GameEngine: ObservableObject {
         }
 
         nextPlayer()
+    }
+
+    // MARK: - Rule Management (Mid-Game Edits)
+    
+    /// Set all players as "on board" - used when turning off opening score requirement
+    func setAllPlayersOnBoard() {
+        for index in players.indices {
+            players[index].isOnBoard = true
+        }
+        logGameEvent("Opening score requirement disabled - all players now on board")
+    }
+    
+    /// Update a player's total score (referee action)
+    /// Returns the old value for logging
+    @discardableResult
+    func setPlayerTotalScore(_ playerId: UUID, to newScore: Int) -> Int? {
+        guard let index = players.firstIndex(where: { $0.id == playerId }) else { return nil }
+        let oldScore = players[index].totalScore
+        players[index].totalScore = max(0, newScore)
+        
+        // If they now have points, ensure they're on board
+        if players[index].totalScore > 0 {
+            players[index].isOnBoard = true
+        }
+        
+        logGameEvent("Referee adjusted \(players[index].name) total score: \(oldScore) → \(players[index].totalScore)")
+        return oldScore
+    }
+    
+    /// Update a player's round score (referee action)
+    /// Returns the old value for logging
+    @discardableResult
+    func setPlayerRoundScore(_ playerId: UUID, to newScore: Int) -> Int? {
+        guard let index = players.firstIndex(where: { $0.id == playerId }) else { return nil }
+        let oldScore = players[index].roundScore
+        players[index].roundScore = max(0, newScore)
+        
+        logGameEvent("Referee adjusted \(players[index].name) round score: \(oldScore) → \(players[index].roundScore)")
+        return oldScore
+    }
+    
+    /// Get the minimum allowed winning score (must be above all player scores)
+    var minimumAllowedWinningScore: Int {
+        let maxPlayerScore = players.map { $0.totalScore }.max() ?? 0
+        // Must be at least 1 point above the leader, with a minimum of 1000
+        return max(1000, maxPlayerScore + 1)
+    }
+    
+    /// Check if winning score can be decreased
+    var canDecreaseWinningScore: Bool {
+        let maxPlayerScore = players.map { $0.totalScore }.max() ?? 0
+        return winningScore > maxPlayerScore + 1000 // Buffer of 1000
     }
 
     // MARK: - Player Management
@@ -660,6 +919,16 @@ class GameEngine: ObservableObject {
 
     func skipTurn() {
         guard let player = currentPlayer else { return }
+        
+        // Skip turn is irreversible - clear undo stack
+        clearUndoStack()
+        
+        // Clear any pending farkle state when skipping
+        if pendingFarkle {
+            pendingFarkle = false
+            farklePlayerName = ""
+            farkleDice = []
+        }
 
         // Skip turn without banking any points
         logGameEvent("\(player.name) skipped their turn")

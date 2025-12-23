@@ -12,6 +12,24 @@ struct ManualScoringView: View {
 
     var body: some View {
         VStack(spacing: 16) {
+            // Preserved digital roll banner
+            if gameEngine.hasDigitalTurnInProgress {
+                HStack(spacing: 6) {
+                    Image(systemName: "die.face.6")
+                        .font(.caption)
+                    Text("Digital roll paused — banking here will bank Calculator points")
+                        .font(.caption)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
+                }
+                .foregroundColor(.blue)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity)
+                .background(Color.blue.opacity(0.1))
+                .cornerRadius(8)
+            }
+            
             // Header
             VStack(spacing: 8) {
                 HStack {
@@ -217,62 +235,151 @@ struct ScoreHistorySection: View {
 
 struct ManualActionButtonsSection: View {
     @ObservedObject var gameEngine: GameEngine
+    @AppStorage("requireHoldToConfirm") private var requireHoldToConfirm: Bool = true
+    @State private var activeConfirmation: ActiveConfirmation? = nil
+    
+    private var canBank: Bool {
+        gameEngine.canPlayerBank()
+    }
 
     var body: some View {
-        HStack(spacing: 12) {
-            // Skip Turn Button (moved to first position)
-            Button(action: { gameEngine.skipPlayer() }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.right.circle.fill")
-                    Text("Skip Turn")
+        VStack(spacing: 12) {
+            // Top row: Skip and Farkle
+            HStack(spacing: 12) {
+                if requireHoldToConfirm {
+                    // Hold-to-confirm mode (default)
+                    CompactHoldButton(
+                        title: "Skip",
+                        icon: "forward.fill",
+                        holdDuration: 0.5,
+                        backgroundColor: FarkleTheme.buttonUndo,
+                        action: {
+                            gameEngine.skipPlayer()
+                        }
+                    )
+                    
+                    CompactHoldButton(
+                        title: "Farkle",
+                        icon: "xmark.circle.fill",
+                        holdDuration: 0.5,
+                        backgroundColor: FarkleTheme.dangerRed,
+                        action: {
+                            gameEngine.farkleManualTurn()
+                        }
+                    )
+                } else {
+                    // Tap-to-confirm mode (accessibility friendly)
+                    Button(action: {
+                        HapticFeedback.light()
+                        activeConfirmation = .skipTurn
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "forward.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("Skip")
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(FarkleTheme.buttonUndo)
+                        .cornerRadius(10)
+                    }
+                    
+                    Button(action: {
+                        HapticFeedback.light()
+                        activeConfirmation = .farkleManual
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("Farkle")
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(FarkleTheme.dangerRed)
+                        .cornerRadius(10)
+                    }
                 }
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .background(FarkleTheme.buttonUndo)
-                .cornerRadius(8)
             }
-
-            // Farkle Button
-            Button(action: { gameEngine.farkleManualTurn() }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark.circle.fill")
-                    Text("Farkle")
+            
+            // Bottom row: Bank Score
+            if requireHoldToConfirm {
+                HoldToConfirmButton(
+                    holdDuration: 0.6,
+                    backgroundColor: canBank ? FarkleTheme.buttonPrimary : FarkleTheme.textSecondary.opacity(0.3),
+                    isEnabled: canBank,
+                    action: {
+                        gameEngine.bankManualScore()
+                    }
+                ) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                        VStack(spacing: 2) {
+                            Text("Bank Score")
+                                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                            if canBank {
+                                Text("Hold to confirm")
+                                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                                    .opacity(0.7)
+                            } else if gameEngine.manualTurnScore > 0 {
+                                Text("Need more points to get on board")
+                                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                                    .opacity(0.7)
+                            }
+                        }
+                    }
                 }
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .background(FarkleTheme.dangerRed)
-                .cornerRadius(8)
+            } else {
+                Button(action: {
+                    HapticFeedback.light()
+                    activeConfirmation = .bankScore
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                        Text("Bank Score")
+                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(canBank ? FarkleTheme.buttonPrimary : FarkleTheme.textSecondary.opacity(0.3))
+                    .cornerRadius(12)
+                }
+                .disabled(!canBank)
             }
-
-            // Bank Score Button (moved to last position)
-            Button(action: {
-                if gameEngine.canPlayerBank() {
-                    gameEngine.bankManualScore()
+        }
+        .fullScreenCover(item: $activeConfirmation) { confirmation in
+            ConfirmationOverlay(
+                title: confirmation.title,
+                message: confirmation.message,
+                primaryActionTitle: confirmation.primaryActionTitle,
+                primaryActionRole: confirmation.isDestructive ? .destructive : nil,
+                onPrimary: {
+                    performConfirmation(confirmation)
+                },
+                onDismiss: {
+                    activeConfirmation = nil
                 }
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                    Text("Bank\nScore")
-                        .multilineTextAlignment(.center)
-                }
-                .font(.system(size: 14, weight: .medium))
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity, minHeight: 44)
-                .background(
-                    gameEngine.canPlayerBank() ? FarkleTheme.buttonSecondary : FarkleTheme.textSecondary.opacity(0.3)
-                )
-                .cornerRadius(8)
-            }
-            .disabled(!gameEngine.canPlayerBank())
-            .onTapGesture {
-                // Show feedback when disabled due to 500-point requirement
-                if gameEngine.manualTurnScore > 0 && !gameEngine.canPlayerBank() {
-                    // This will trigger the existing "need points" banner
-                    // The validation logic is already handled by canPlayerBank()
-                }
-            }
+            )
+            .background(ClearBackgroundView())
+        }
+    }
+    
+    private func performConfirmation(_ confirmation: ActiveConfirmation) {
+        switch confirmation {
+        case .skipTurn:
+            gameEngine.skipPlayer()
+        case .bankScore:
+            gameEngine.bankManualScore()
+        case .farkleManual:
+            gameEngine.farkleManualTurn()
+        default:
+            break
         }
     }
 }

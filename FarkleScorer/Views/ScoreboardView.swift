@@ -325,16 +325,19 @@ struct PlayerScoreRow: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 4) {
-                Text("\(player.displayScore)")
+                Text(player.displayScore, format: .number)
                     .font(.title2)
                     .fontWeight(.bold)
                     .foregroundColor(isCurrentPlayer ? .blue : .primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
 
                 if player.roundScore > 0 {
                     Text("+\(player.roundScore)")
                         .font(.caption)
                         .fontWeight(.semibold)
                         .foregroundColor(.green)
+                        .lineLimit(1)
                 }
 
                 if player.gameHistory.count > 0 {
@@ -592,6 +595,8 @@ struct EditablePlayerScoreRow: View {
     let canDelete: Bool
     let onEdit: (String) -> Void
     let onDelete: () -> Void
+    
+    @State private var showingScoreEditor = false
 
     var isEditing: Bool {
         editingPlayerID == player.id
@@ -664,10 +669,22 @@ struct EditablePlayerScoreRow: View {
                         Spacer()
 
                         HStack(spacing: 8) {
+                            // Edit name button
                             Button(action: startEdit) {
                                 Image(systemName: "pencil.circle.fill")
                                     .foregroundColor(.blue)
                                     .font(.title3)
+                            }
+                            
+                            // Edit score button (referee action, host-only in multiplayer)
+                            if gameEngine.canEditRules {
+                                Button {
+                                    showingScoreEditor = true
+                                } label: {
+                                    Image(systemName: "number.circle.fill")
+                                        .foregroundColor(.orange)
+                                        .font(.title3)
+                                }
                             }
 
                             if canDelete {
@@ -705,24 +722,16 @@ struct EditablePlayerScoreRow: View {
             if !isEditing {
                 Spacer()
 
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text("\(player.displayScore)")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                        .foregroundColor(isCurrentPlayer ? .blue : .primary)
-
-                    if player.roundScore > 0 {
-                        Text("+\(player.roundScore)")
-                            .font(.caption)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.green)
+                // Tappable score area (opens score editor if allowed)
+                if gameEngine.canEditRules {
+                    Button {
+                        showingScoreEditor = true
+                    } label: {
+                        ScoreDisplayContent(player: player, isCurrentPlayer: isCurrentPlayer)
                     }
-
-                    if player.gameHistory.count > 0 {
-                        Text("\(player.gameHistory.count) turns")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
+                    .buttonStyle(.plain)
+                } else {
+                    ScoreDisplayContent(player: player, isCurrentPlayer: isCurrentPlayer)
                 }
             }
         }
@@ -731,6 +740,17 @@ struct EditablePlayerScoreRow: View {
         .background(isCurrentPlayer ? Color.blue.opacity(0.05) : Color.clear)
         .cornerRadius(8)
         .animation(.easeInOut(duration: 0.2), value: isEditing)
+        .sheet(isPresented: $showingScoreEditor) {
+            ScoreEditingSheet(player: player) { newTotal, newRound in
+                // Apply score changes via GameEngine (logs to history)
+                if newTotal != player.totalScore {
+                    gameEngine.setPlayerTotalScore(player.id, to: newTotal)
+                }
+                if newRound != player.roundScore {
+                    gameEngine.setPlayerRoundScore(player.id, to: newRound)
+                }
+            }
+        }
     }
 
     private var rankColor: Color {
@@ -756,6 +776,37 @@ struct EditablePlayerScoreRow: View {
     private func cancelEdit() {
         editingPlayerID = nil
         editingPlayerName = ""
+    }
+}
+
+/// Helper view for score display (reused for both interactive and non-interactive versions)
+private struct ScoreDisplayContent: View {
+    let player: Player
+    let isCurrentPlayer: Bool
+    
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Text(player.displayScore, format: .number)
+                .font(.title2)
+                .fontWeight(.bold)
+                .foregroundColor(isCurrentPlayer ? .blue : .primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+
+            if player.roundScore > 0 {
+                Text("+\(player.roundScore)")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.green)
+                    .lineLimit(1)
+            }
+
+            if player.gameHistory.count > 0 {
+                Text("\(player.gameHistory.count) turns")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
     }
 }
 

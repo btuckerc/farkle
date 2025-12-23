@@ -5,51 +5,55 @@ struct MultiplayerGameSetupView: View {
     @State private var newPlayerName = ""
     @State private var showingRules = false
     @State private var showingNetworkInfo = false
+    @State private var showingSettings = false
 
     var gameEngine: GameEngine {
         multiplayerGameEngine.gameEngine
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 20) {
-                    // Integrated Header
-                    VStack(spacing: 16) {
-                        HStack {
-                            Text("🎲 Farkle")
-                                .farkleTitle()
+        NavigationStack {
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(spacing: 20) {
+                        // Streamlined Header (no app name, focused on context)
+                        VStack(spacing: 16) {
+                            HStack {
+                                Text("New Game")
+                                    .font(.title)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.primary)
 
-                            Spacer()
+                                Spacer()
 
-                            // Network status indicator
-                            if multiplayerGameEngine.isMultiplayerMode {
-                                Button(action: { showingNetworkInfo = true }) {
-                                    HStack(spacing: 6) {
-                                        Circle()
-                                            .fill(connectionColor)
-                                            .frame(width: 8, height: 8)
+                                // Network status indicator
+                                if multiplayerGameEngine.isMultiplayerMode {
+                                    Button(action: { showingNetworkInfo = true }) {
+                                        HStack(spacing: 6) {
+                                            Circle()
+                                                .fill(connectionColor)
+                                                .frame(width: 8, height: 8)
 
-                                        Text(multiplayerGameEngine.isNetworkHost ? "HOST" : "CLIENT")
-                                            .farkleCaption()
-                                            .fontWeight(.bold)
+                                            Text(multiplayerGameEngine.isNetworkHost ? "HOST" : "CLIENT")
+                                                .farkleCaption()
+                                                .fontWeight(.bold)
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 4)
+                                        .background(Color(.systemGray6))
+                                        .cornerRadius(6)
                                     }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color(.systemGray6))
-                                    .cornerRadius(6)
                                 }
                             }
-                        }
-                        .padding(.top, 20)
+                            .padding(.top, 12)
 
-                        Text(multiplayerGameEngine.isMultiplayerMode ? "Multi-Phone Game Setup" : "Configure your game")
-                            .farkleSection()
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
-                    .background(Color(.systemBackground))
+                            Text(multiplayerGameEngine.isMultiplayerMode ? "Multi-Phone Game Setup" : "Configure your game")
+                                .farkleSection()
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal)
+                        .padding(.bottom, 8)
+                        .background(Color(.systemBackground))
 
                     VStack(spacing: 24) {
                         // Players Section (Flip7-style card)
@@ -91,11 +95,29 @@ struct MultiplayerGameSetupView: View {
                     .shadow(color: Color.black.opacity(0.05), radius: 8, x: 0, y: -2)
             )
         }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: { showingSettings = true }) {
+                        Image(systemName: "gearshape")
+                    }
+                }
+                
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showingRules = true }) {
+                        Image(systemName: "info.circle")
+                    }
+                }
+            }
+        }
         .sheet(isPresented: $showingRules) {
             FarkleRulesView()
         }
         .sheet(isPresented: $showingNetworkInfo) {
             NetworkInfoView(multiplayerGameEngine: multiplayerGameEngine)
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(gameEngine: gameEngine)
         }
     }
 
@@ -304,10 +326,12 @@ struct HostGameButton: View {
 
 struct JoinGameButton: View {
     @ObservedObject var multiplayerGameEngine: MultiplayerGameEngine
+    @State private var showingHostSelection = false
 
     var body: some View {
         Button(action: {
             multiplayerGameEngine.joinGame()
+            showingHostSelection = true
         }) {
             HStack(spacing: 12) {
                 Image(systemName: "wifi")
@@ -336,6 +360,169 @@ struct JoinGameButton: View {
             .padding(.vertical, 12)
             .background(Color(.tertiarySystemBackground))
             .cornerRadius(8)
+        }
+        .buttonStyle(PlainButtonStyle())
+        .sheet(isPresented: $showingHostSelection) {
+            HostSelectionSheet(multiplayerGameEngine: multiplayerGameEngine)
+        }
+    }
+}
+
+// MARK: - Host Selection Sheet (Pick-from-list UI)
+
+struct HostSelectionSheet: View {
+    @ObservedObject var multiplayerGameEngine: MultiplayerGameEngine
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                // Header
+                VStack(spacing: 8) {
+                    Image(systemName: "wifi.circle.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.blue)
+                    
+                    Text("Find a Game")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                    
+                    Text("Select a game to join from the list below")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.top)
+                
+                // Connection state indicator
+                if multiplayerGameEngine.networkManager.connectionState == .connecting {
+                    HStack {
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle())
+                        Text("Connecting...")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .background(Color(.tertiarySystemBackground))
+                    .cornerRadius(10)
+                }
+                
+                // Discovered hosts list
+                if multiplayerGameEngine.discoveredHosts.isEmpty {
+                    VStack(spacing: 16) {
+                        ProgressView()
+                            .scaleEffect(1.2)
+                        
+                        Text("Looking for games...")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        
+                        Text("Make sure the host has started their game")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding()
+                } else {
+                    ScrollView {
+                        VStack(spacing: 12) {
+                            ForEach(multiplayerGameEngine.discoveredHosts) { host in
+                                DiscoveredHostCard(
+                                    host: host,
+                                    onSelect: {
+                                        multiplayerGameEngine.connectToHost(host)
+                                        // Don't dismiss yet - wait for connection
+                                    }
+                                )
+                            }
+                        }
+                        .padding()
+                    }
+                }
+                
+                Spacer()
+            }
+            .navigationTitle("Join Game")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") {
+                        multiplayerGameEngine.networkManager.stopNetworking()
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .onChange(of: multiplayerGameEngine.networkManager.connectionState) { oldValue, newValue in
+            // Auto-dismiss when connected
+            if newValue == .connected {
+                dismiss()
+            }
+        }
+    }
+}
+
+struct DiscoveredHostCard: View {
+    let host: DiscoveredHost
+    let onSelect: () -> Void
+    
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 16) {
+                // Host icon
+                ZStack {
+                    Circle()
+                        .fill(Color.green.opacity(0.15))
+                        .frame(width: 48, height: 48)
+                    
+                    Image(systemName: "wifi.router.fill")
+                        .font(.title2)
+                        .foregroundColor(.green)
+                }
+                
+                // Host info
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(host.displayName)
+                        .font(.headline)
+                        .foregroundColor(.primary)
+                    
+                    HStack(spacing: 8) {
+                        // Game code
+                        HStack(spacing: 4) {
+                            Image(systemName: "number")
+                                .font(.caption2)
+                            Text(host.gameId)
+                                .font(.caption)
+                                .fontWeight(.medium)
+                        }
+                        .foregroundColor(.blue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.blue.opacity(0.1))
+                        .cornerRadius(6)
+                        
+                        // Player count
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.fill")
+                                .font(.caption2)
+                            Text("\(host.playerCount)")
+                                .font(.caption)
+                        }
+                        .foregroundColor(.secondary)
+                    }
+                }
+                
+                Spacer()
+                
+                Image(systemName: "chevron.right")
+                    .font(.caption)
+                    .foregroundColor(.gray)
+            }
+            .padding()
+            .background(Color(.secondarySystemBackground))
+            .cornerRadius(12)
         }
         .buttonStyle(PlainButtonStyle())
     }

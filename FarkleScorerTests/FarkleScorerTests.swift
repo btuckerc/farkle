@@ -252,4 +252,547 @@ final class FarkleTests: XCTestCase {
 
         XCTAssertEqual(gameEngine.remainingDice, 6) // Reset to 6 for hot dice
     }
+    
+    // MARK: - Undo Functionality Tests
+    
+    func testUndoAfterContinueRolling() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.startGame()
+        
+        // Set up initial state with a roll
+        gameEngine.currentRoll = [1, 5, 2, 3, 4, 6]
+        gameEngine.selectDice([1, 5])
+        
+        let scoreBeforeContinue = gameEngine.turnScore
+        XCTAssertEqual(scoreBeforeContinue, 150)
+        
+        // Continue rolling (this should save undo state)
+        gameEngine.continueRolling()
+        
+        // Verify undo is available
+        XCTAssertTrue(gameEngine.canUndo)
+        
+        // Perform undo
+        gameEngine.undoLastSelection()
+        
+        // Verify state was restored
+        XCTAssertEqual(gameEngine.turnScore, scoreBeforeContinue)
+        XCTAssertEqual(gameEngine.currentRoll, [1, 5, 2, 3, 4, 6])
+        XCTAssertFalse(gameEngine.canUndo) // Undo stack should be empty now
+    }
+    
+    func testUndoNotAvailableAfterRoll() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.startGame()
+        
+        // Roll dice - this should clear undo stack
+        _ = gameEngine.rollDice()
+        
+        // Undo should not be available (rolling is irreversible)
+        XCTAssertFalse(gameEngine.canUndo)
+    }
+    
+    func testUndoNotAvailableAfterBank() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.startGame()
+        
+        // Set up and bank some points
+        gameEngine.currentRoll = [1, 5, 2, 3, 4, 6]
+        gameEngine.selectDice([1, 5])
+        gameEngine.bankScore()
+        
+        // Undo should not be available (banking is irreversible)
+        XCTAssertFalse(gameEngine.canUndo)
+    }
+    
+    func testManualScoreUndo() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.startGame()
+        gameEngine.toggleManualMode()
+        
+        // Add some manual scores
+        gameEngine.addManualScore(100)
+        XCTAssertTrue(gameEngine.canUndo)
+        XCTAssertEqual(gameEngine.manualTurnScore, 100)
+        
+        gameEngine.addManualScore(50)
+        XCTAssertEqual(gameEngine.manualTurnScore, 150)
+        
+        // Undo should restore previous state
+        gameEngine.undoLastSelection()
+        XCTAssertEqual(gameEngine.manualTurnScore, 100)
+        
+        gameEngine.undoLastSelection()
+        XCTAssertEqual(gameEngine.manualTurnScore, 0)
+        XCTAssertFalse(gameEngine.canUndo)
+    }
+    
+    func testUndoStackBoundedSize() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.startGame()
+        gameEngine.toggleManualMode()
+        
+        // Add many manual scores to exceed stack limit (30)
+        for i in 1...40 {
+            gameEngine.addManualScore(i)
+        }
+        
+        // Should still be able to undo
+        XCTAssertTrue(gameEngine.canUndo)
+        
+        // Undo all available actions
+        var undoCount = 0
+        while gameEngine.canUndo {
+            gameEngine.undoLastSelection()
+            undoCount += 1
+        }
+        
+        // Should have undone up to maxUndoStackSize (30) times
+        XCTAssertLessThanOrEqual(undoCount, 30)
+    }
+    
+    // MARK: - State Invariant Tests
+    
+    func testPlayerIndexInBounds() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.addPlayer(name: "Bob")
+        gameEngine.startGame()
+        
+        // Advance through multiple turns
+        for _ in 0..<10 {
+            gameEngine.selectDice([1])
+            gameEngine.bankScore()
+        }
+        
+        // Player index should always be in bounds
+        XCTAssertTrue(gameEngine.currentPlayerIndex < gameEngine.players.count)
+    }
+    
+    func testRemainingDiceInValidRange() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.startGame()
+        
+        // Initial state
+        XCTAssertTrue(gameEngine.remainingDice >= 1 && gameEngine.remainingDice <= 6)
+        
+        // After selection
+        gameEngine.currentRoll = [1, 5, 2, 3, 4, 6]
+        gameEngine.selectDice([1, 5])
+        gameEngine.continueRolling()
+        
+        XCTAssertTrue(gameEngine.remainingDice >= 1 && gameEngine.remainingDice <= 6)
+    }
+    
+    func testEmptyPlayerGuard() throws {
+        // Game should not start without players
+        gameEngine.startGame()
+        XCTAssertEqual(gameEngine.gameState, .setup) // Should remain in setup
+    }
+    
+    // MARK: - Play Again / Restart Tests
+    
+    func testRestartGameKeepsPlayers() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.addPlayer(name: "Bob")
+        gameEngine.startGame()
+        
+        // Play some turns
+        gameEngine.selectDice([1, 1, 1])
+        gameEngine.bankScore()
+        gameEngine.selectDice([5, 5])
+        gameEngine.bankScore()
+        
+        // Restart game
+        gameEngine.restartGame()
+        
+        // Players should be preserved
+        XCTAssertEqual(gameEngine.players.count, 2)
+        XCTAssertEqual(gameEngine.players[0].name, "Alice")
+        XCTAssertEqual(gameEngine.players[1].name, "Bob")
+        
+        // Scores should be reset
+        XCTAssertEqual(gameEngine.players[0].totalScore, 0)
+        XCTAssertEqual(gameEngine.players[1].totalScore, 0)
+        
+        // Game should be in playing state
+        XCTAssertEqual(gameEngine.gameState, .playing)
+    }
+    
+    func testRestartGameResetsHistory() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.startGame()
+        
+        // Play a few turns
+        gameEngine.selectDice([1])
+        gameEngine.bankScore()
+        
+        XCTAssertFalse(gameEngine.players[0].gameHistory.isEmpty)
+        
+        // Restart
+        gameEngine.restartGame()
+        
+        // History should be cleared
+        XCTAssertTrue(gameEngine.players[0].gameHistory.isEmpty)
+    }
+    
+    func testSkipTurnClearsUndoStack() throws {
+        gameEngine.addPlayer(name: "Alice")
+        gameEngine.addPlayer(name: "Bob")
+        gameEngine.startGame()
+        
+        // Set up some state with undo available
+        gameEngine.currentRoll = [1, 5, 2, 3, 4, 6]
+        gameEngine.selectDice([1, 5])
+        gameEngine.continueRolling()
+        XCTAssertTrue(gameEngine.canUndo)
+        
+        // Skip turn should clear undo
+        gameEngine.skipTurn()
+        XCTAssertFalse(gameEngine.canUndo)
+    }
+}
+
+// MARK: - Multiplayer Round Tests
+
+final class MultiplayerRoundTests: XCTestCase {
+    
+    var multiplayerEngine: MultiplayerGameEngine!
+    
+    override func setUpWithError() throws {
+        multiplayerEngine = MultiplayerGameEngine()
+    }
+    
+    override func tearDownWithError() throws {
+        multiplayerEngine = nil
+    }
+    
+    // MARK: - Turn Submission Tests
+    
+    func testTurnSubmissionAppliesScore() throws {
+        // Setup: Create a game with players
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.gameEngine.addPlayer(name: "Bob")
+        multiplayerEngine.enableDebugMode() // This sets up multiplayer state
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        let initialScore = multiplayerEngine.gameEngine.players[0].totalScore
+        
+        // Create a turn submission
+        let turnResult = TurnResultData(
+            scoreEarned: 500,
+            isFarkle: false,
+            wasManualMode: false,
+            rolls: []
+        )
+        
+        let submission = TurnSubmissionData(
+            playerId: aliceId,
+            deviceId: multiplayerEngine.currentDeviceId,
+            turnResult: turnResult,
+            timestamp: Date()
+        )
+        
+        // Submit the turn
+        multiplayerEngine.handleTurnSubmission(submission)
+        
+        // Verify score was applied
+        XCTAssertEqual(multiplayerEngine.gameEngine.players[0].totalScore, initialScore + 500)
+        XCTAssertTrue(multiplayerEngine.gameEngine.players[0].isOnBoard)
+    }
+    
+    func testFarkleSubmissionAppliesNoScore() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        let initialScore = multiplayerEngine.gameEngine.players[0].totalScore
+        let initialFarkles = multiplayerEngine.gameEngine.players[0].consecutiveFarkles
+        
+        // Create a farkle submission
+        let turnResult = TurnResultData(
+            scoreEarned: 0,
+            isFarkle: true,
+            wasManualMode: false,
+            rolls: []
+        )
+        
+        let submission = TurnSubmissionData(
+            playerId: aliceId,
+            deviceId: multiplayerEngine.currentDeviceId,
+            turnResult: turnResult,
+            timestamp: Date()
+        )
+        
+        multiplayerEngine.handleTurnSubmission(submission)
+        
+        // Verify no score change and consecutive farkles incremented
+        XCTAssertEqual(multiplayerEngine.gameEngine.players[0].totalScore, initialScore)
+        XCTAssertEqual(multiplayerEngine.gameEngine.players[0].consecutiveFarkles, initialFarkles + 1)
+    }
+    
+    func testTurnSubmissionMarksPlayerAsSubmitted() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        
+        // Initially should be pending
+        XCTAssertEqual(multiplayerEngine.playerRoundStatuses[aliceId], .pending)
+        
+        let turnResult = TurnResultData(
+            scoreEarned: 100,
+            isFarkle: false,
+            wasManualMode: false,
+            rolls: []
+        )
+        
+        let submission = TurnSubmissionData(
+            playerId: aliceId,
+            deviceId: multiplayerEngine.currentDeviceId,
+            turnResult: turnResult,
+            timestamp: Date()
+        )
+        
+        multiplayerEngine.handleTurnSubmission(submission)
+        
+        // Should now be submitted
+        XCTAssertEqual(multiplayerEngine.playerRoundStatuses[aliceId], .submitted)
+    }
+    
+    // MARK: - Round Completion Tests
+    
+    func testAllPlayersSubmittedDetection() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.gameEngine.addPlayer(name: "Bob")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        let bobId = multiplayerEngine.gameEngine.players[1].id.uuidString
+        
+        // Initially not all submitted
+        XCTAssertFalse(multiplayerEngine.allPlayersSubmitted)
+        XCTAssertEqual(multiplayerEngine.submittedPlayerCount, 0)
+        
+        // Submit Alice's turn
+        let aliceResult = TurnResultData(scoreEarned: 100, isFarkle: false, wasManualMode: false, rolls: [])
+        let aliceSubmission = TurnSubmissionData(playerId: aliceId, deviceId: multiplayerEngine.currentDeviceId, turnResult: aliceResult, timestamp: Date())
+        multiplayerEngine.handleTurnSubmission(aliceSubmission)
+        
+        XCTAssertFalse(multiplayerEngine.allPlayersSubmitted)
+        XCTAssertEqual(multiplayerEngine.submittedPlayerCount, 1)
+        
+        // Submit Bob's turn
+        let bobResult = TurnResultData(scoreEarned: 200, isFarkle: false, wasManualMode: false, rolls: [])
+        let bobSubmission = TurnSubmissionData(playerId: bobId, deviceId: "debug-device-1", turnResult: bobResult, timestamp: Date())
+        multiplayerEngine.handleTurnSubmission(bobSubmission)
+        
+        // Now all submitted
+        XCTAssertTrue(multiplayerEngine.allPlayersSubmitted)
+        XCTAssertEqual(multiplayerEngine.submittedPlayerCount, 2)
+    }
+    
+    func testGetPendingPlayers() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.gameEngine.addPlayer(name: "Bob")
+        multiplayerEngine.gameEngine.addPlayer(name: "Charlie")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.startGame()
+        
+        // Initially all pending
+        let pendingPlayers = multiplayerEngine.getPendingPlayers()
+        XCTAssertEqual(pendingPlayers.count, 3)
+        
+        // Submit one player's turn
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        let result = TurnResultData(scoreEarned: 100, isFarkle: false, wasManualMode: false, rolls: [])
+        let submission = TurnSubmissionData(playerId: aliceId, deviceId: multiplayerEngine.currentDeviceId, turnResult: result, timestamp: Date())
+        multiplayerEngine.handleTurnSubmission(submission)
+        
+        // Now only 2 pending
+        let pendingAfter = multiplayerEngine.getPendingPlayers()
+        XCTAssertEqual(pendingAfter.count, 2)
+        XCTAssertFalse(pendingAfter.contains(where: { $0.name == "Alice" }))
+    }
+    
+    // MARK: - Final Round Tests
+    
+    func testFinalRoundTrigger() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.gameEngine.addPlayer(name: "Bob")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.gameEngine.winningScore = 10000
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        
+        // Set Alice's score near winning
+        multiplayerEngine.gameEngine.players[0].totalScore = 9500
+        
+        // Initially not final round
+        XCTAssertFalse(multiplayerEngine.isFinalRound)
+        XCTAssertNil(multiplayerEngine.finalRoundTriggerPlayerId)
+        
+        // Submit a high-scoring turn that pushes past winning score
+        let result = TurnResultData(scoreEarned: 600, isFarkle: false, wasManualMode: false, rolls: [])
+        let submission = TurnSubmissionData(playerId: aliceId, deviceId: multiplayerEngine.currentDeviceId, turnResult: result, timestamp: Date())
+        multiplayerEngine.handleTurnSubmission(submission)
+        
+        // Should trigger final round
+        XCTAssertTrue(multiplayerEngine.isFinalRound)
+        XCTAssertEqual(multiplayerEngine.finalRoundTriggerPlayerId, aliceId)
+        XCTAssertEqual(multiplayerEngine.gameEngine.players[0].totalScore, 10100)
+    }
+    
+    func testFinalRoundDoesNotRetrigger() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.gameEngine.addPlayer(name: "Bob")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.gameEngine.winningScore = 10000
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        let bobId = multiplayerEngine.gameEngine.players[1].id.uuidString
+        
+        // Manually set final round state
+        multiplayerEngine.isFinalRound = true
+        multiplayerEngine.finalRoundTriggerPlayerId = aliceId
+        
+        // Set Bob near winning too
+        multiplayerEngine.gameEngine.players[1].totalScore = 9500
+        
+        // Bob scores high (but final round already triggered)
+        let result = TurnResultData(scoreEarned: 1000, isFarkle: false, wasManualMode: false, rolls: [])
+        let submission = TurnSubmissionData(playerId: bobId, deviceId: "debug-device-1", turnResult: result, timestamp: Date())
+        multiplayerEngine.handleTurnSubmission(submission)
+        
+        // Final round trigger should remain Alice
+        XCTAssertEqual(multiplayerEngine.finalRoundTriggerPlayerId, aliceId)
+    }
+    
+    // MARK: - Force Advance Tests
+    
+    func testForceAdvanceSkipsPendingPlayers() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.gameEngine.addPlayer(name: "Bob")
+        multiplayerEngine.gameEngine.addPlayer(name: "Charlie")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        
+        // Submit only Alice's turn
+        let result = TurnResultData(scoreEarned: 100, isFarkle: false, wasManualMode: false, rolls: [])
+        let submission = TurnSubmissionData(playerId: aliceId, deviceId: multiplayerEngine.currentDeviceId, turnResult: result, timestamp: Date())
+        multiplayerEngine.handleTurnSubmission(submission)
+        
+        // Force advance
+        multiplayerEngine.forceAdvanceRound(reason: .hostOverride)
+        
+        // Bob and Charlie should be skipped
+        let bobId = multiplayerEngine.gameEngine.players[1].id.uuidString
+        let charlieId = multiplayerEngine.gameEngine.players[2].id.uuidString
+        
+        XCTAssertEqual(multiplayerEngine.playerRoundStatuses[bobId], .skipped)
+        XCTAssertEqual(multiplayerEngine.playerRoundStatuses[charlieId], .skipped)
+    }
+    
+    // MARK: - Opening Score Requirement Tests
+    
+    func testOpeningScoreRequirementInMultiplayer() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.gameEngine.require500Opening = true
+        multiplayerEngine.gameEngine.openingScoreThreshold = 500
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        
+        // Alice is not on board
+        XCTAssertFalse(multiplayerEngine.gameEngine.players[0].isOnBoard)
+        
+        // Submit a turn below threshold
+        let lowResult = TurnResultData(scoreEarned: 300, isFarkle: false, wasManualMode: false, rolls: [])
+        let lowSubmission = TurnSubmissionData(playerId: aliceId, deviceId: multiplayerEngine.currentDeviceId, turnResult: lowResult, timestamp: Date())
+        multiplayerEngine.handleTurnSubmission(lowSubmission)
+        
+        // Should still not be on board (score lost)
+        XCTAssertFalse(multiplayerEngine.gameEngine.players[0].isOnBoard)
+        XCTAssertEqual(multiplayerEngine.gameEngine.players[0].totalScore, 0)
+        
+        // Reset for next round
+        multiplayerEngine.playerRoundStatuses[aliceId] = .pending
+        
+        // Submit a turn at or above threshold
+        let highResult = TurnResultData(scoreEarned: 500, isFarkle: false, wasManualMode: false, rolls: [])
+        let highSubmission = TurnSubmissionData(playerId: aliceId, deviceId: multiplayerEngine.currentDeviceId, turnResult: highResult, timestamp: Date())
+        multiplayerEngine.handleTurnSubmission(highSubmission)
+        
+        // Should now be on board with score
+        XCTAssertTrue(multiplayerEngine.gameEngine.players[0].isOnBoard)
+        XCTAssertEqual(multiplayerEngine.gameEngine.players[0].totalScore, 500)
+    }
+    
+    // MARK: - Round Number Tests
+    
+    func testRoundNumberIncrementsOnNewRound() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.startGame()
+        
+        XCTAssertEqual(multiplayerEngine.roundNumber, 1)
+        
+        // Manually start a new round (simulating what happens after all submit)
+        multiplayerEngine.startNewRound()
+        
+        XCTAssertEqual(multiplayerEngine.roundNumber, 2)
+    }
+    
+    func testNewRoundResetsPendingStatuses() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.gameEngine.addPlayer(name: "Bob")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        let bobId = multiplayerEngine.gameEngine.players[1].id.uuidString
+        
+        // Submit both turns
+        let result = TurnResultData(scoreEarned: 100, isFarkle: false, wasManualMode: false, rolls: [])
+        multiplayerEngine.handleTurnSubmission(TurnSubmissionData(playerId: aliceId, deviceId: multiplayerEngine.currentDeviceId, turnResult: result, timestamp: Date()))
+        multiplayerEngine.handleTurnSubmission(TurnSubmissionData(playerId: bobId, deviceId: "debug-device-1", turnResult: result, timestamp: Date()))
+        
+        // Both should be submitted
+        XCTAssertEqual(multiplayerEngine.playerRoundStatuses[aliceId], .submitted)
+        XCTAssertEqual(multiplayerEngine.playerRoundStatuses[bobId], .submitted)
+        
+        // Start new round
+        multiplayerEngine.startNewRound()
+        
+        // Both should be back to pending
+        XCTAssertEqual(multiplayerEngine.playerRoundStatuses[aliceId], .pending)
+        XCTAssertEqual(multiplayerEngine.playerRoundStatuses[bobId], .pending)
+    }
+    
+    func testNewRoundClearsSubmittedTurns() throws {
+        multiplayerEngine.gameEngine.addPlayer(name: "Alice")
+        multiplayerEngine.enableDebugMode()
+        multiplayerEngine.startGame()
+        
+        let aliceId = multiplayerEngine.gameEngine.players[0].id.uuidString
+        
+        // Submit a turn
+        let result = TurnResultData(scoreEarned: 100, isFarkle: false, wasManualMode: false, rolls: [])
+        multiplayerEngine.handleTurnSubmission(TurnSubmissionData(playerId: aliceId, deviceId: multiplayerEngine.currentDeviceId, turnResult: result, timestamp: Date()))
+        
+        XCTAssertFalse(multiplayerEngine.submittedTurns.isEmpty)
+        
+        // Start new round
+        multiplayerEngine.startNewRound()
+        
+        XCTAssertTrue(multiplayerEngine.submittedTurns.isEmpty)
+    }
 }

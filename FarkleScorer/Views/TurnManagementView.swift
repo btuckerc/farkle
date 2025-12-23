@@ -15,29 +15,8 @@ struct TurnManagementView: View {
 
             // Game Status and Warnings
             GameStatusSection(gameEngine: gameEngine)
-
-            // Status message spacing and undo button area
-            VStack(spacing: 8) {
-                // Consistent spacing whether status messages are visible or not
-                Spacer().frame(height: 8)
-
-                // Undo button (show when user can undo last selection)
-                if gameEngine.canUndo && !gameEngine.isManualMode {
-                    Button(action: { gameEngine.undoLastSelection() }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.uturn.backward")
-                            Text("Undo Last Selection")
-                        }
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity, minHeight: 36)
-                        .background(Color.orange)
-                        .cornerRadius(8)
-                    }
-                    .transition(.scale.combined(with: .opacity))
-                    .animation(.easeInOut(duration: 0.3), value: gameEngine.canUndo)
-                }
-            }
+            
+            // Note: Undo button is now in the FloatingActionBar (ContentView) for better visibility
         }
     }
 }
@@ -63,14 +42,18 @@ struct CurrentPlayerHeader: View {
                     Spacer()
 
                     VStack(alignment: .trailing, spacing: 4) {
-                        Text("\(currentPlayer.displayScore)")
+                        Text(currentPlayer.displayScore, format: .number)
                             .font(.title2)
                             .fontWeight(.bold)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
 
                         if currentPlayer.roundScore > 0 {
                             Text("+\(currentPlayer.roundScore) this round")
                                 .font(.caption)
                                 .foregroundColor(.green)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
                         }
                     }
                 }
@@ -181,7 +164,8 @@ struct RollSection: View {
     }
 
     private var canRoll: Bool {
-        gameEngine.currentRoll.isEmpty && gameEngine.gameState == .playing || gameEngine.gameState == .finalRound
+        // Fixed precedence: must have empty roll AND be in playing/finalRound state
+        gameEngine.currentRoll.isEmpty && (gameEngine.gameState == .playing || gameEngine.gameState == .finalRound)
     }
 
     private func rollDice() {
@@ -389,9 +373,8 @@ class SoundManager: ObservableObject {
         // Create a realistic dice rolling sound with multiple rapid clicks
         playDiceRollingSequence()
 
-        // Add haptic feedback for better user experience
-        let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-        impactFeedback.impactOccurred()
+        // Add haptic feedback for better user experience (respects user's haptics setting)
+        HapticFeedback.medium()
     }
 
         private func playDiceRollingSequence() {

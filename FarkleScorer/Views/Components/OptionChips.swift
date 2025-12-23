@@ -8,6 +8,7 @@ struct OptionChips<T: Hashable & RawRepresentable>: View where T.RawValue == Str
     let labelForOption: (T) -> String
     let iconForOption: (T) -> String
     let colorForOption: ((T) -> Color)?
+    let previewColorsForOption: ((T) -> [Color])?
     
     init(
         options: [T],
@@ -15,7 +16,8 @@ struct OptionChips<T: Hashable & RawRepresentable>: View where T.RawValue == Str
         onSelect: @escaping (T) -> Void,
         labelForOption: @escaping (T) -> String,
         iconForOption: @escaping (T) -> String,
-        colorForOption: ((T) -> Color)? = nil
+        colorForOption: ((T) -> Color)? = nil,
+        previewColorsForOption: ((T) -> [Color])? = nil
     ) {
         self.options = options
         self.selectedOption = selectedOption
@@ -23,6 +25,7 @@ struct OptionChips<T: Hashable & RawRepresentable>: View where T.RawValue == Str
         self.labelForOption = labelForOption
         self.iconForOption = iconForOption
         self.colorForOption = colorForOption
+        self.previewColorsForOption = previewColorsForOption
     }
     
     var body: some View {
@@ -35,6 +38,7 @@ struct OptionChips<T: Hashable & RawRepresentable>: View where T.RawValue == Str
                         label: labelForOption(option),
                         icon: iconForOption(option),
                         color: colorForOption?(option),
+                        previewColors: previewColorsForOption?(option),
                         onTap: {
                             onSelect(option)
                         }
@@ -52,24 +56,39 @@ struct OptionChip: View {
     let label: String
     let icon: String
     let color: Color?
+    let previewColors: [Color]?
     let onTap: () -> Void
     
     var body: some View {
         Button(action: onTap) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 12))
-                    .foregroundStyle(color ?? .primary)
-                    .frame(width: 24, height: 24)
+            VStack(spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: icon)
+                        .font(.system(size: 12))
+                        .foregroundStyle(color ?? .primary)
+                        .frame(width: 24, height: 24)
+                    
+                    Text(label)
+                        .font(.system(size: 14, weight: isSelected ? .semibold : .regular, design: .rounded))
+                        .foregroundStyle(isSelected ? .primary : .secondary)
+                    
+                    if isSelected {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(color ?? .blue)
+                    }
+                }
                 
-                Text(label)
-                    .font(.system(size: 14, weight: isSelected ? .semibold : .regular, design: .rounded))
-                    .foregroundStyle(isSelected ? .primary : .secondary)
-                
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(color ?? .blue)
+                // Preview colors row (for palette selection)
+                if let previewColors = previewColors {
+                    HStack(spacing: 3) {
+                        ForEach(0..<min(4, previewColors.count), id: \.self) { i in
+                            Circle()
+                                .fill(previewColors[i])
+                                .frame(width: 10, height: 10)
+                        }
+                    }
+                    .padding(.top, 2)
                 }
             }
             .padding(.horizontal, 12)

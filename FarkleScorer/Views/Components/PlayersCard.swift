@@ -135,17 +135,20 @@ struct PlayersCard: View {
             }
             focusCoordinator.setOrder(playerRows.map { $0.id })
         }
-        .confirmationDialog(
-            "Clear All Players",
-            isPresented: $showingClearConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Clear All Players", role: .destructive) {
-                clearPlayers()
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("This will remove all players. This action cannot be undone.")
+        .fullScreenCover(isPresented: $showingClearConfirmation) {
+            ConfirmationOverlay(
+                title: "Clear All Players",
+                message: "This will remove all players and reset to default. This action cannot be undone.",
+                primaryActionTitle: "Clear All",
+                primaryActionRole: .destructive,
+                onPrimary: {
+                    clearPlayers()
+                },
+                onDismiss: {
+                    showingClearConfirmation = false
+                }
+            )
+            .background(ClearBackgroundView())
         }
         .sheet(isPresented: $showingPlayerManagement) {
             NavigationView {

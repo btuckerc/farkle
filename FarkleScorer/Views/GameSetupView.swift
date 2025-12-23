@@ -4,64 +4,80 @@ struct GameSetupView: View {
     @ObservedObject var gameEngine: GameEngine
     @State private var newPlayerName = ""
     @State private var showingRules = false
+    @State private var showingSettings = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 20) {
-                    // Integrated Header
-                    VStack(spacing: 16) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("🎲 Farkle")
-                                    .farkleTitle()
+        NavigationStack {
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(spacing: 20) {
+                        // Streamlined Header (context-focused, no redundant app name)
+                        VStack(spacing: 16) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("New Game")
+                                        .font(.title)
+                                        .fontWeight(.bold)
+                                        .foregroundColor(.primary)
 
-                                Text("Configure your game")
-                                    .farkleSection()
+                                    Text("Configure your game")
+                                        .farkleSection()
+                                }
+
+                                Spacer()
                             }
-
-                            Spacer()
-
-                            Button(action: { showingRules = true }) {
-                                Image(systemName: "info.circle")
-                                    .font(.title2)
-                                    .foregroundColor(.accentColor)
-                            }
+                            .padding(.top, 12)
                         }
-                        .padding(.top, 20)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal)
+                        .padding(.bottom, 8)
+                        .background(Color(.systemBackground))
+
+                        VStack(spacing: 24) {
+                            // Players Section (Flip7-style card)
+                            PlayersCard(gameEngine: gameEngine, canEdit: true)
+
+                            // Scoring Customization Section (new)
+                            ScoringCustomizationSection(gameEngine: gameEngine)
+
+                            // Game Rules Configuration (moved to bottom)
+                            GameRulesSection(gameEngine: gameEngine)
+                        }
+                        .padding(.horizontal)
+                        .padding(.bottom, 100) // Space for start button
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
-                    .background(Color(.systemBackground))
+                }
 
-                    VStack(spacing: 24) {
-                        // Players Section (Flip7-style card)
-                        PlayersCard(gameEngine: gameEngine, canEdit: true)
+                // Fixed Start Game Button
+                VStack(spacing: 0) {
+                    Divider()
 
-                        // Scoring Customization Section (new)
-                        ScoringCustomizationSection(gameEngine: gameEngine)
-
-                        // Game Rules Configuration (moved to bottom)
-                        GameRulesSection(gameEngine: gameEngine)
+                    StartGameSection(gameEngine: gameEngine)
+                        .padding(.horizontal)
+                        .padding(.bottom, 8)
+                }
+                .background(Color(.systemBackground))
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: { showingSettings = true }) {
+                        Image(systemName: "gearshape")
                     }
-                    .padding(.horizontal)
-                    .padding(.bottom, 100) // Space for start button
+                }
+                
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(action: { showingRules = true }) {
+                        Image(systemName: "info.circle")
+                    }
                 }
             }
-
-            // Fixed Start Game Button
-            VStack(spacing: 0) {
-                Divider()
-
-                StartGameSection(gameEngine: gameEngine)
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
-            }
-            .background(Color(.systemBackground))
         }
         .sheet(isPresented: $showingRules) {
             FarkleRulesView()
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(gameEngine: gameEngine)
         }
     }
 }

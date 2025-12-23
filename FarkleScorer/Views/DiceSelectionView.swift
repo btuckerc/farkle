@@ -6,8 +6,14 @@ struct DiceSelectionView: View {
     @State private var showingSuggestions = false
     @State private var validationWarning: String? = nil
     @State private var invalidIndices: Set<Int> = []
-    @State private var tapAnimationScale: CGFloat = 1.0
-    @State private var textAnimationOpacity: Double = 1.0
+    
+    // PERF: Single shared ScoringEngine instance - no repeated allocations
+    private let scoringEngine = ScoringEngine()
+    
+    // PERF: Precomputed scoring indices - computed once per roll, not per-die
+    private var scoringIndices: Set<Int> {
+        scoringEngine.getScoringDiceIndices(for: gameEngine.currentRoll)
+    }
 
     private var selectedDice: [Int] {
         selectedIndices.compactMap { (index: Int) -> Int? in
@@ -17,198 +23,83 @@ struct DiceSelectionView: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            VStack(spacing: 16) {
-                        // Header with farkle detection
-            HStack {
-                // Animated call-to-action instead of static text - hide during farkle
-                if !gameEngine.pendingFarkle {
-                    HStack(spacing: 6) {
-                        Image(systemName: "hand.tap.fill")
-                            .foregroundColor(.blue)
-                            .font(.caption)
-                            .scaleEffect(tapAnimationScale)
-                            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: tapAnimationScale)
-
-                        Text("Tap scoring dice to select")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.blue)
-                            .opacity(textAnimationOpacity)
-                            .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: textAnimationOpacity)
-                    }
-                    .onAppear {
-                        tapAnimationScale = 1.1
-                        textAnimationOpacity = 0.8
-                    }
+        VStack(spacing: 10) {
+            // Preserved calculator points banner (compact)
+            if gameEngine.hasManualTurnInProgress {
+                HStack(spacing: 4) {
+                    Image(systemName: "calculator")
+                        .font(.caption2)
+                    Text("Calculator: \(gameEngine.manualTurnScore) pts saved")
+                        .font(.caption2)
                 }
-
-                Spacer()
-
-                if !gameEngine.currentRoll.isEmpty && !gameEngine.canScoreAnyPoints(for: gameEngine.currentRoll) && !gameEngine.pendingFarkle {
-                    Text("FARKLE!")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                        .foregroundColor(.red)
-                        .scaleEffect(1.2)
-                        .animation(.easeInOut(duration: 0.5).repeatCount(3), value: gameEngine.currentRoll)
-                }
+                .foregroundColor(.orange)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(6)
             }
 
             // Farkle Acknowledgment Overlay
             if gameEngine.pendingFarkle {
                 FarkleAcknowledgmentView(gameEngine: gameEngine)
                     .transition(.scale.combined(with: .opacity))
-                    .zIndex(1)
-            } else {
-                // Natural responsive layout with wiggle prevention
-                VStack(spacing: 16) {
-                    // Dice display
-                    if !gameEngine.currentRoll.isEmpty {
-                        DiceGrid(
-                            dice: gameEngine.currentRoll,
-                            selectedIndices: $selectedIndices,
-                            invalidIndices: invalidIndices,
-                            onSelectionChanged: updateSelection
-                        )
-
-                        // Action buttons row - ALWAYS PRESENT to prevent layout shifts
-                        HStack(spacing: 12) {
-                            // Select All/None toggle button - always present, may be disabled
-                            Button(action: toggleSelectAll) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: allScoringDiceSelected ? "checkmark.square.fill" : "square")
-                                        .font(.system(size: 16, weight: .medium))
-                                        .frame(width: 20)
-
-                                    Text(allScoringDiceSelected ? "Select None" : "Select All Scoring")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.8)
-                                }
-                                .foregroundColor(hasSelectableScoring ? .blue : .gray)
-                                .frame(width: 180, alignment: .leading)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .background((hasSelectableScoring ? Color.blue : Color.gray).opacity(allScoringDiceSelected ? 0.15 : 0.1))
-                                .cornerRadius(8)
-                            }
-                            .disabled(!hasSelectableScoring)
-
-                            // Suggestions toggle button
-                            Button(action: {
-                                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-                                    showingSuggestions.toggle()
-                                }
-
-                                if showingSuggestions {
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                                        withAnimation(.easeInOut(duration: 0.6)) {
-                                            proxy.scrollTo("suggestions", anchor: .center)
-                                        }
-                                    }
-                                }
-                            }) {
-                                Image(systemName: showingSuggestions ? "lightbulb.fill" : "lightbulb")
-                                    .font(.system(size: 16, weight: .medium))
-                                    .foregroundColor(.purple)
-                                    .padding(10)
-                                    .background(Color.purple.opacity(showingSuggestions ? 0.15 : 0.08))
-                                    .cornerRadius(8)
-                            }
-                            .frame(width: 44)
-                        }
-                        .frame(height: 44)
-                    }
-
-                    // Selection info card - STABLE LAYOUT
-                    SelectionInfoCard(
-                        selectedDice: selectedDice,
-                        score: gameEngine.turnScore,
-                        gameEngine: gameEngine,
-                        hasSelection: !selectedIndices.isEmpty
+            } else if !gameEngine.currentRoll.isEmpty {
+                // Compact dice area
+                VStack(spacing: 8) {
+                    // Dice grid with integrated toolbar
+                    DiceGridWithToolbar(
+                        dice: gameEngine.currentRoll,
+                        selectedIndices: $selectedIndices,
+                        invalidIndices: invalidIndices,
+                        scoringIndices: scoringIndices,
+                        allScoringDiceSelected: allScoringDiceSelected,
+                        hasSelectableScoring: hasSelectableScoring,
+                        showingSuggestions: $showingSuggestions,
+                        onSelectionChanged: updateSelection,
+                        onToggleSelectAll: toggleSelectAll
                     )
-
-                    // Warning area - ALWAYS PRESENT CONTAINER to prevent layout shifts
-                    Group {
-                        if gameEngine.invalidSelectionWarning {
-                            VStack(spacing: 8) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .foregroundColor(.red)
-                                    Text("Invalid Selection")
-                                        .font(.headline)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(.red)
-                                }
-                                Text("You must select at least one scoring die combination before continuing to roll.")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.center)
-                            }
-                            .padding()
-                            .background(Color.red.opacity(0.1))
-                            .cornerRadius(12)
-                            .transition(.opacity)
-                        } else if let warning = validationWarning {
-                            let isJustTip = warning.starts(with: "Tip:")
-                            let color: Color = isJustTip ? .blue : .orange
-                            let title = isJustTip ? "Scoring Tip" : "Selection Rule Violation"
-
-                            VStack(spacing: 8) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: isJustTip ? "lightbulb.fill" : "exclamationmark.triangle.fill")
-                                        .foregroundColor(color)
-                                    Text(title)
-                                        .font(.headline)
-                                        .fontWeight(.semibold)
-                                        .foregroundColor(color)
-                                }
-                                Text(warning)
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.center)
-
-                                if !isJustTip {
-                                    Button("Fix Selection") {
-                                        fixInvalidSelection()
-                                    }
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 8)
-                                    .background(Color.orange)
-                                    .cornerRadius(8)
-                                }
-                            }
-                            .padding()
-                            .background(color.opacity(0.1))
-                            .cornerRadius(12)
-                            .transition(.opacity)
-                        }
+                    
+                    // Compact warnings (only when needed)
+                    if gameEngine.invalidSelectionWarning {
+                        CompactWarningBanner(
+                            icon: "exclamationmark.triangle.fill",
+                            message: "Select at least one scoring die to continue",
+                            color: .red
+                        )
+                    } else if let warning = validationWarning {
+                        let isJustTip = warning.starts(with: "Tip:")
+                        CompactWarningBanner(
+                            icon: isJustTip ? "lightbulb.fill" : "exclamationmark.triangle.fill",
+                            message: warning,
+                            color: isJustTip ? .blue : .orange,
+                            showFixButton: !isJustTip,
+                            onFix: fixInvalidSelection
+                        )
                     }
-
-                    // Suggestions area
-                    if showingSuggestions && !gameEngine.currentRoll.isEmpty {
-                        SuggestionsSection(gameEngine: gameEngine) { suggestion in
+                    
+                    // Suggestions (compact, overlay-style)
+                    if showingSuggestions {
+                        CompactSuggestionsView(gameEngine: gameEngine) { suggestion in
                             selectSuggestion(suggestion)
                             showingSuggestions = false
                         }
-                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
-                        .id("suggestions")
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
                 }
             }
-            }
-            .padding()
-            .animation(.easeInOut(duration: 0.3), value: gameEngine.pendingFarkle)
-            .onChange(of: gameEngine.currentRoll) { _, _ in
-                selectedIndices.removeAll()
-                validationWarning = nil
-                invalidIndices.removeAll()
-                gameEngine.selectDice([])
-            }
+        }
+        .padding(12)
+        .background(FarkleTheme.cardBackground)
+        .cornerRadius(20)
+        .shadow(color: FarkleTheme.shadowColor, radius: 6, x: 0, y: 2)
+        .animation(.easeInOut(duration: 0.3), value: gameEngine.pendingFarkle)
+        .animation(.easeInOut(duration: 0.2), value: showingSuggestions)
+        .onChange(of: gameEngine.currentRoll) { _, _ in
+            // PERF: Only reset local state; engine state resets are handled by GameEngine itself
+            selectedIndices.removeAll()
+            validationWarning = nil
+            invalidIndices.removeAll()
+            showingSuggestions = false
         }
     }
 
@@ -218,8 +109,7 @@ struct DiceSelectionView: View {
             return gameEngine.currentRoll[index]
         }
 
-                // Validate the selection according to Farkle rules
-        let scoringEngine = ScoringEngine()
+        // PERF: Use shared scoringEngine instance
         let validation = scoringEngine.validateDiceSelection(selectedIndices, for: gameEngine.currentRoll)
 
         if validation.isValid {
@@ -257,19 +147,17 @@ struct DiceSelectionView: View {
     }
 
     private var hasSelectableScoring: Bool {
-        !gameEngine.currentRoll.isEmpty && gameEngine.canScoreAnyPoints(for: gameEngine.currentRoll)
+        !gameEngine.currentRoll.isEmpty && !scoringIndices.isEmpty
     }
 
     private var allScoringDiceSelected: Bool {
+        // PERF: Use precomputed scoringIndices
         guard hasSelectableScoring else { return false }
-        let scoringEngine = ScoringEngine()
-        let scoringIndices = scoringEngine.getScoringDiceIndices(for: gameEngine.currentRoll)
-        return !scoringIndices.isEmpty && scoringIndices.isSubset(of: selectedIndices)
+        return scoringIndices.isSubset(of: selectedIndices)
     }
 
     private func selectAllScoringDice() {
-        let scoringEngine = ScoringEngine()
-        let scoringIndices = scoringEngine.getScoringDiceIndices(for: gameEngine.currentRoll)
+        // PERF: Use precomputed scoringIndices
         selectedIndices = scoringIndices
         updateSelection()
     }
@@ -289,8 +177,8 @@ struct DiceSelectionView: View {
     }
 
     private func fixInvalidSelection() {
-        let scoringEngine = ScoringEngine()
-
+        // PERF: Use shared scoringEngine instance
+        
         // Try to find the best valid selection based on current selection
         // Count dice values in current selection
         let diceCounts = Dictionary(grouping: selectedIndices) { index in
@@ -317,9 +205,8 @@ struct DiceSelectionView: View {
             }
         }
 
-        // If we couldn't create a valid selection, fall back to selecting all scoring dice
+        // If we couldn't create a valid selection, fall back to precomputed scoring indices
         if newSelection.isEmpty {
-            let scoringIndices = scoringEngine.getScoringDiceIndices(for: gameEngine.currentRoll)
             newSelection = scoringIndices
         }
 
@@ -337,47 +224,201 @@ struct DiceSelectionView: View {
     }
 }
 
-struct DiceGrid: View {
+// MARK: - Compact Dice Grid with Integrated Toolbar
+struct DiceGridWithToolbar: View {
     let dice: [Int]
     @Binding var selectedIndices: Set<Int>
     let invalidIndices: Set<Int>
+    let scoringIndices: Set<Int>
+    let allScoringDiceSelected: Bool
+    let hasSelectableScoring: Bool
+    @Binding var showingSuggestions: Bool
     let onSelectionChanged: () -> Void
-
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
-
+    let onToggleSelectAll: () -> Void
+    
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 10), count: 3)
+    
     var body: some View {
-        LazyVGrid(columns: columns, spacing: 16) {
-            ForEach(Array(dice.enumerated()), id: \.offset) { index, die in
-                DiceView(
-                    value: die,
-                    isSelected: selectedIndices.contains(index),
-                    canScore: canScore(at: index),
-                    isInvalid: invalidIndices.contains(index)
-                ) {
-                    toggleSelection(at: index)
+        VStack(spacing: 0) {
+            // Dice grid first
+            LazyVGrid(columns: columns, spacing: 12) {
+                ForEach(Array(dice.enumerated()), id: \.offset) { index, die in
+                    DiceView(
+                        value: die,
+                        isSelected: selectedIndices.contains(index),
+                        canScore: scoringIndices.contains(index),
+                        isInvalid: invalidIndices.contains(index)
+                    ) {
+                        toggleSelection(at: index)
+                    }
                 }
             }
+            .padding(12)
+            .background(FarkleTheme.tertiaryBackground)
+            
+            // Toolbar row below dice
+            HStack(spacing: 8) {
+                // Select All/None toggle with clear labels
+                Button(action: onToggleSelectAll) {
+                    HStack(spacing: 5) {
+                        Image(systemName: allScoringDiceSelected ? "checkmark.square.fill" : "square")
+                            .font(.system(size: 13, weight: .medium))
+                        Text(allScoringDiceSelected ? "Select None" : "Select All Scoring")
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
+                    }
+                    .foregroundColor(hasSelectableScoring ? .blue : .gray)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill((hasSelectableScoring ? Color.blue : Color.gray).opacity(0.1))
+                    )
+                }
+                .disabled(!hasSelectableScoring)
+                
+                Spacer()
+                
+                // Suggestions toggle with label - square button
+                Button(action: {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        showingSuggestions.toggle()
+                    }
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: showingSuggestions ? "lightbulb.fill" : "lightbulb")
+                            .font(.system(size: 13, weight: .medium))
+                        Text("Tips")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundColor(.purple)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.purple.opacity(showingSuggestions ? 0.15 : 0.08))
+                    )
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(FarkleTheme.tertiaryBackground)
         }
-        .padding()
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(15)
+        .cornerRadius(14)
     }
-
-    private func canScore(at index: Int) -> Bool {
-        let scoringEngine = ScoringEngine()
-        return scoringEngine.canDieScore(at: index, in: dice)
-    }
-
+    
     private func toggleSelection(at index: Int) {
-        // Only allow selection of dice that can actually score
-        guard canScore(at: index) else { return }
-
+        guard scoringIndices.contains(index) else { return }
+        HapticFeedback.selectionChanged()
         if selectedIndices.contains(index) {
             selectedIndices.remove(index)
         } else {
             selectedIndices.insert(index)
         }
         onSelectionChanged()
+    }
+}
+
+// MARK: - Compact Warning Banner
+struct CompactWarningBanner: View {
+    let icon: String
+    let message: String
+    let color: Color
+    var showFixButton: Bool = false
+    var onFix: (() -> Void)? = nil
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(color)
+            
+            Text(message)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(color)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
+            
+            Spacer(minLength: 4)
+            
+            if showFixButton, let onFix = onFix {
+                Button("Fix", action: onFix)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(color)
+                    .cornerRadius(4)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(color.opacity(0.1))
+        .cornerRadius(8)
+    }
+}
+
+// MARK: - Compact Suggestions View
+struct CompactSuggestionsView: View {
+    let gameEngine: GameEngine
+    let onSuggestionSelected: (ScoringOption) -> Void
+    
+    /// Safely computed suggestions with guard against empty/invalid state
+    private var suggestions: [ScoringOption] {
+        // Guard against empty or invalid roll state
+        guard !gameEngine.currentRoll.isEmpty,
+              gameEngine.currentRoll.count <= 6,
+              gameEngine.currentRoll.allSatisfy({ $0 >= 1 && $0 <= 6 }) else {
+            return []
+        }
+        
+        // Safely get suggestions with a limit
+        let allSuggestions = gameEngine.getPossibleScorings(for: gameEngine.currentRoll)
+        return Array(allSuggestions.prefix(3))
+    }
+    
+    var body: some View {
+        VStack(spacing: 6) {
+            // Use stable identifier based on suggestion content, not array index
+            ForEach(suggestions, id: \.stableId) { suggestion in
+                Button(action: { onSuggestionSelected(suggestion) }) {
+                    HStack(spacing: 8) {
+                        // Dice chips - use index for display only
+                        HStack(spacing: 2) {
+                            ForEach(0..<min(4, suggestion.selectedDice.count), id: \.self) { idx in
+                                Text("\(suggestion.selectedDice[idx])")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 18, height: 18)
+                                    .background(Color.purple.opacity(0.8))
+                                    .cornerRadius(3)
+                            }
+                            if suggestion.selectedDice.count > 4 {
+                                Text("+\(suggestion.selectedDice.count - 4)")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundColor(.purple)
+                            }
+                        }
+                        
+                        Text(suggestion.description)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        
+                        Spacer()
+                        
+                        Text("\(suggestion.score)")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.purple)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color.purple.opacity(0.08))
+                    .cornerRadius(8)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+        }
     }
 }
 
@@ -389,8 +430,7 @@ struct DiceView: View {
     let onTap: () -> Void
 
     @State private var isPressed = false
-    @State private var glowOpacity: Double = 0.6
-    @State private var glowRadius: CGFloat = 2
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
     var body: some View {
         Button(action: {
@@ -400,54 +440,56 @@ struct DiceView: View {
         }) {
             ZStack {
                 // Dice background
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 10)
                     .fill(diceBackgroundColor)
-                    .shadow(color: .black.opacity(0.2), radius: isPressed ? 2 : 4, x: 0, y: isPressed ? 1 : 2)
-                    .scaleEffect(isPressed ? 0.95 : 1.0)
+                    .shadow(color: .black.opacity(0.2), radius: isPressed ? 2 : 3, x: 0, y: isPressed ? 1 : 2)
 
                 // Selection ring
                 if isSelected {
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(isInvalid ? FarkleTheme.diceInvalid : FarkleTheme.diceSelected, lineWidth: 3)
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(isInvalid ? FarkleTheme.diceInvalid : FarkleTheme.diceSelected, lineWidth: 2.5)
                         .scaleEffect(1.05)
                 }
 
-                // Invalid selection indicator
+                // Invalid selection indicator (brief shake, not continuous)
                 if isInvalid && isSelected {
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(FarkleTheme.diceInvalid, lineWidth: 3)
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(FarkleTheme.diceInvalid, lineWidth: 2.5)
                         .scaleEffect(1.1)
                         .opacity(0.8)
-                        .animation(.easeInOut(duration: 0.5).repeatCount(3, autoreverses: true), value: isInvalid)
                 }
 
-                // Scoring indicator with attractive glow animation
+                // PERF: Static scoring indicator - no continuous animation
+                // Uses a subtle but clear border to show scoreable dice
                 if canScore && !isSelected && !isInvalid {
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(FarkleTheme.diceScoring.opacity(glowOpacity), lineWidth: 2)
-                        .shadow(color: FarkleTheme.diceScoring.opacity(glowOpacity * 0.4), radius: glowRadius, x: 0, y: 0)
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(FarkleTheme.diceScoring.opacity(0.7), lineWidth: 2)
+                        .shadow(color: FarkleTheme.diceScoring.opacity(0.3), radius: 3, x: 0, y: 0)
                         .scaleEffect(1.02)
-                        .onAppear {
-                            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-                                glowOpacity = 0.9
-                                glowRadius = 6
-                            }
-                        }
                 }
 
                 // Dice dots or number
                 DiceDotsView(value: value)
+                
+                // Differentiate Without Color: show icons for state
+                if differentiateWithoutColor {
+                    DiceStateIndicator(isSelected: isSelected, canScore: canScore, isInvalid: isInvalid)
+                }
             }
-            .frame(width: 70, height: 70)
-            .animation(.easeInOut(duration: 0.2), value: isSelected)
+            .frame(width: 60, height: 60)
+            .scaleEffect(isPressed ? 0.95 : 1.0)
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isSelected)
+            .animation(.spring(response: 0.15, dampingFraction: 0.8), value: isPressed)
         }
-        .buttonStyle(PlainButtonStyle())
-        .scaleEffect(isPressed ? 0.95 : 1.0)
+        .buttonStyle(.plain)
         .onLongPressGesture(minimumDuration: 0, maximumDistance: .infinity, pressing: { pressing in
-            withAnimation(.easeInOut(duration: 0.1)) {
-                isPressed = pressing
-            }
+            isPressed = pressing
         }, perform: {})
+        // Accessibility support
+        .accessibilityLabel(accessibilityLabelText)
+        .accessibilityHint(accessibilityHintText)
+        .accessibilityValue(accessibilityValueText)
+        .accessibilityAddTraits(.isButton)
     }
 
     private var diceBackgroundColor: Color {
@@ -460,6 +502,67 @@ struct DiceView: View {
         } else {
             return FarkleTheme.cardBackground
         }
+    }
+    
+    // MARK: - Accessibility
+    
+    private var accessibilityLabelText: String {
+        "Die showing \(value)"
+    }
+    
+    private var accessibilityValueText: String {
+        if isSelected && isInvalid {
+            return "Selected, invalid selection"
+        } else if isSelected {
+            return "Selected"
+        } else if canScore {
+            return "Can score"
+        } else {
+            return "Cannot score"
+        }
+    }
+    
+    private var accessibilityHintText: String {
+        if canScore {
+            return isSelected ? "Double tap to deselect" : "Double tap to select"
+        } else {
+            return "This die cannot score"
+        }
+    }
+}
+
+/// Visual indicator for dice state when Differentiate Without Color is enabled
+struct DiceStateIndicator: View {
+    let isSelected: Bool
+    let canScore: Bool
+    let isInvalid: Bool
+    
+    var body: some View {
+        VStack {
+            HStack {
+                Spacer()
+                if isSelected && isInvalid {
+                    // Invalid selection: warning icon
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12))
+                        .foregroundColor(.white)
+                        .padding(2)
+                        .background(Circle().fill(FarkleTheme.diceInvalid))
+                } else if isSelected {
+                    // Selected: checkmark
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(FarkleTheme.diceSelected)
+                } else if canScore {
+                    // Can score: star indicator
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(FarkleTheme.diceScoring)
+                }
+            }
+            Spacer()
+        }
+        .padding(4)
     }
 }
 
@@ -566,174 +669,6 @@ struct Center<Content: View>: View {
     }
 }
 
-struct SelectionInfoCard: View {
-    let selectedDice: [Int]
-    let score: Int
-    let gameEngine: GameEngine
-    let hasSelection: Bool
-
-    var body: some View {
-        VStack(spacing: 8) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Selected:")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-
-                        // FIXED SIZE container for dice selection - never changes dimensions
-                        HStack(spacing: 4) {
-                            if hasSelection {
-                                // Show up to 6 dice with fixed positions
-                                ForEach(0..<6, id: \.self) { index in
-                                    if index < selectedDice.count {
-                                        Text("\(selectedDice[index])")
-                                            .font(.caption)
-                                            .fontWeight(.bold)
-                                            .foregroundColor(.white)
-                                            .frame(width: 24, height: 24)
-                                            .background(FarkleTheme.diceSelected)
-                                            .cornerRadius(4)
-                                    } else {
-                                        // Invisible placeholder to maintain consistent width
-                                        Text("")
-                                            .frame(width: 24, height: 24)
-                                    }
-                                }
-                            } else {
-                                Text("—")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 164, height: 24, alignment: .leading) // Fixed width for 6 dice + spacing
-                            }
-                        }
-                        .frame(width: 164, height: 24) // FIXED DIMENSIONS - 6 dice (24px) + 5 spacers (4px)
-                    }
-
-                    HStack {
-                        Text("Round Total:")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .frame(width: 80, alignment: .leading) // Fixed width
-
-                        let currentRoundScore = gameEngine.currentPlayer?.roundScore ?? 0
-                        let projectedTotal = currentRoundScore + (hasSelection ? score : 0)
-
-                        // FIXED WIDTH container for round total to prevent any text width changes
-                        Text(hasSelection && score > 0 ? "\(currentRoundScore) + \(score) = \(projectedTotal)" : "\(currentRoundScore)")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.green)
-                            .monospacedDigit() // Consistent digit width
-                            .frame(width: 100, alignment: .leading) // FIXED WIDTH regardless of content
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8) // Scale down if needed but maintain width
-                    }
-                }
-
-                Spacer(minLength: 8)
-
-                VStack(alignment: .trailing) {
-                    // FIXED WIDTH container for points - exactly 80px regardless of value
-                    Text("\(hasSelection ? score : 0) pts")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                        .foregroundColor(hasSelection ? .blue : .secondary)
-                        .monospacedDigit() // Consistent digit width
-                        .frame(width: 80, alignment: .trailing) // EXACT FIXED WIDTH
-                        .lineLimit(1)
-                }
-            }
-        }
-        .padding()
-        .background(FarkleTheme.cardBackground.opacity(0.8))
-        .cornerRadius(12)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(hasSelection ? FarkleTheme.diceSelected.opacity(0.3) : FarkleTheme.textSecondary.opacity(0.2), lineWidth: 1)
-        )
-        .frame(height: 100) // Fixed height
-        .opacity(hasSelection ? 1.0 : 0.6)
-    }
-}
-
-struct SuggestionsSection: View {
-    let gameEngine: GameEngine
-    let onSuggestionSelected: (ScoringOption) -> Void
-
-    private var suggestions: [ScoringOption] {
-        guard !gameEngine.currentRoll.isEmpty else { return [] }
-        return Array(gameEngine.getPossibleScorings(for: gameEngine.currentRoll)
-            .prefix(4)) // Show top 4 suggestions
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Suggestions")
-                .font(.headline)
-                .fontWeight(.semibold)
-
-            if suggestions.isEmpty {
-                Text("No scoring combinations available")
-                    .foregroundColor(.red)
-                    .font(.subheadline)
-                    .padding()
-                    .background(Color.red.opacity(0.1))
-                    .cornerRadius(8)
-            } else {
-                LazyVStack(spacing: 8) {
-                    ForEach(Array(suggestions.enumerated()), id: \.offset) { index, suggestion in
-                        SuggestionCard(
-                            suggestion: suggestion,
-                            onSelect: { onSuggestionSelected(suggestion) }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-struct SuggestionCard: View {
-    let suggestion: ScoringOption
-    let onSelect: () -> Void
-
-    var body: some View {
-        Button(action: onSelect) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(suggestion.description)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                        .foregroundColor(.primary)
-
-                    Text("Dice: \(suggestion.selectedDice.map(String.init).joined(separator: ", "))")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                Text("\(suggestion.score)")
-                    .font(.title3)
-                    .fontWeight(.bold)
-                    .foregroundColor(.blue)
-
-                Image(systemName: "arrow.right.circle")
-                    .foregroundColor(.blue)
-            }
-            .padding()
-            .background(Color(.secondarySystemBackground))
-            .cornerRadius(10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
-            )
-        }
-        .buttonStyle(PlainButtonStyle())
-    }
-}
-
 // ActionButtonsSection removed - actions moved to floating action bar in ContentView
 
 struct FarkleAcknowledgmentView: View {
@@ -787,27 +722,22 @@ struct FarkleAcknowledgmentView: View {
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
-            }
-
-            // Acknowledge button
-            Button(action: { gameEngine.acknowledgeFarkle() }) {
-                HStack {
-                    Image(systemName: "checkmark.circle.fill")
-                    Text("Next Player")
-                        .fontWeight(.semibold)
+                
+                // Hint to use bottom bar
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down")
+                        .font(.caption)
+                    Text("Tap below to continue")
+                        .font(.caption)
+                        .fontWeight(.medium)
                 }
-                .font(.title3)
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity)
-                .padding()
-                .background(Color.blue)
-                .cornerRadius(12)
+                .foregroundColor(FarkleTheme.textSecondary)
+                .padding(.top, 4)
             }
         }
-        .padding(24)
-        .background(Color(.systemBackground))
+        .padding(20)
+        .background(FarkleTheme.cardBackground)
         .cornerRadius(16)
-        .shadow(color: Color.black.opacity(0.15), radius: 10)
         .overlay(
             RoundedRectangle(cornerRadius: 16)
                 .stroke(Color.red.opacity(0.3), lineWidth: 2)
